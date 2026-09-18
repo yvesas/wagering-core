@@ -1,0 +1,46 @@
+# Local environment. For this round (phases 1-5) only PostgreSQL is needed.
+# The queue emulator and the identity provider arrive in phases 7 and 9.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: wagering-postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-wagering}
+      POSTGRES_USER: ${DB_USER:-wagering}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-local-dev-only}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # Without this the application starts before the database accepts
+      # connections and fails at startup for a reason that is not its own.
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-wagering} -d ${DB_NAME:-wagering}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # A second, isolated database so integration tests neither compete with the
+  # development environment nor wipe its data.
+  postgres-test:
+    image: postgres:17-alpine
+    container_name: wagering-postgres-test
+    environment:
+      POSTGRES_DB: wagering_test
+      POSTGRES_USER: wagering
+      POSTGRES_PASSWORD: local-dev-only
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data   # in memory: tests need not outlive the container
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wagering -d wagering_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    profiles: ["test"]
+
+volumes:
+  postgres-data:

@@ -1,0 +1,5 @@
+0.6.4-fork
+
+Este .claude/ foi bifurcado do yas-claude-base v0.6.4 e passou a ser do projeto.
+`update-baseline.sh` foi removido de propósito: ele sobrescreveria as regras e
+os hooks adaptados para Go. Ver .claude/README.md.

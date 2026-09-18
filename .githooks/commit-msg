@@ -1,0 +1,49 @@
+#!/bin/sh
+# Rejeita atribuição de IA e exige Conventional Commits.
+# Instalado por: git config core.hooksPath .githooks
+# (o `prepare` do package.json faz isso automaticamente no npm install)
+
+msg_file="$1"
+# Ignora linhas de comentário: elas são removidas da mensagem final de qualquer jeito.
+msg=$(grep -v '^#' "$msg_file")
+
+fail() {
+  echo "commit-msg: $1" >&2
+  echo >&2
+  echo "Ver CONTRIBUTING.md. Não contorne este hook com --no-verify." >&2
+  exit 1
+}
+
+# --- 1. Sem atribuição de IA, sem assinatura de ferramenta ------------------
+if printf '%s' "$msg" | grep -qiE '^[[:space:]]*co-authored-by:'; then
+  fail "mensagens de commit não podem conter trailer Co-Authored-By."
+fi
+
+if printf '%s' "$msg" | grep -qiE 'generated (with|by)[[:space:]]+.*(claude|copilot|cursor|chatgpt|gpt|gemini|codex|ai\b)'; then
+  fail "mensagens de commit não podem mencionar geração por IA."
+fi
+
+if printf '%s' "$msg" | grep -qiE '(🤖|noreply@anthropic\.com)'; then
+  fail "mensagens de commit não podem carregar assinatura de ferramenta ou endereço de bot."
+fi
+
+# --- 2. Conventional Commits ------------------------------------------------
+subject=$(printf '%s' "$msg" | sed '/^[[:space:]]*$/d' | head -n 1)
+
+# Deixa passar as mensagens geradas pelo próprio git.
+case "$subject" in
+  "Merge "* | "Revert "* | "fixup!"* | "squash!"*) exit 0 ;;
+esac
+
+if ! printf '%s' "$subject" |
+  grep -qE '^(feat|fix|docs|chore|refactor|test|perf|build|ci|style)(\([a-z0-9./-]+\))?!?: .+'; then
+  fail "o subject deve seguir Conventional Commits, ex.: 'feat(auth): add refresh token rotation'.
+Tipos aceitos: feat, fix, docs, chore, refactor, test, perf, build, ci, style.
+Recebido: $subject"
+fi
+
+if [ "${#subject}" -gt 72 ]; then
+  fail "o subject tem ${#subject} caracteres; mantenha abaixo de 72."
+fi
+
+exit 0

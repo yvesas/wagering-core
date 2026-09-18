@@ -1,0 +1,20 @@
+# Secrets — only the example is versioned
+.env
+.env.*
+!.env.example
+
+# Build
+/bin/
+/dist/
+*.exe
+*.test
+
+# Coverage and profiles
+coverage.out
+coverage.html
+*.prof
+
+# Tooling and OS
+.DS_Store
+.idea/
+.vscode/
