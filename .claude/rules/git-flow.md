@@ -41,13 +41,36 @@ rejeita; **não contorne com `--no-verify`** — o `settings.json` também nega 
 
 ## Pull Requests
 
-- Sempre contra `main`, **squash merge**. O título do PR vira o commit na `main`,
-  então segue o mesmo formato de commit.
-- **Ao mergear, informe o corpo do commit explicitamente** (`gh pr merge --squash
-  --subject … --body …`, ou editando o campo na interface). Deixado em branco, o
-  GitHub monta o corpo sozinho e acrescenta `Co-authored-by:` de quem autorou os
-  commits — o que põe atribuição na `main` sem passar por hook nenhum, porque
-  merge pelo servidor não roda `commit-msg`.
+- Sempre contra `main`. **Squash é o padrão**, e aí o título do PR vira o commit
+  na `main`, seguindo o mesmo formato de commit.
+- **Merge commit quando os commits da branch são assuntos distintos e cada um
+  passa sozinho.** O squash existe para a `main` não herdar commit de
+  checkpoint — "wip", "fix typo", "agora vai". Quando a branch traz, por
+  exemplo, um ADR, três camadas e a documentação, squashar não limpa nada:
+  joga fora um `git bisect` que funcionava.
+
+  A permissão tem um preço, e ele é verificável. Antes de pedir merge commit,
+  prove que cada um passa isolado:
+
+  ```bash
+  for sha in $(git rev-list main..HEAD); do
+    wt=$(mktemp -d)
+    git worktree add -q --detach "$wt" "$sha"
+    (cd "$wt" && make check >/dev/null 2>&1) \
+      && echo "✓ $sha" || echo "⛔ $sha"
+    git worktree remove --force "$wt"
+  done
+  ```
+
+  Um `⛔` na lista significa que os commits não eram atômicos, e aí **squash**.
+  Sem essa verificação, "são assuntos distintos" é opinião, e a `main` herda um
+  histórico que parece bissectável e não é.
+- **Ao mergear, informe o corpo do commit explicitamente** — vale para
+  `--squash` e para `--merge` (`gh pr merge --merge --subject … --body …`, ou
+  editando o campo na interface). Deixado em branco, o GitHub monta o corpo
+  sozinho e acrescenta `Co-authored-by:` de quem autorou os commits — o que põe
+  atribuição na `main` sem passar por hook nenhum, porque merge pelo servidor
+  não roda `commit-msg`. Confira depois: `git log -1 --format='%B' origin/main`.
 - **Rebase, nunca merge** de `main` na branch: `git fetch origin && git rebase origin/main`.
 - Se o rebase reescreveu commits já enviados: `--force-with-lease`, nunca `--force`.
 - Um assunto por PR. Referenciar a issue no título ou corpo.
