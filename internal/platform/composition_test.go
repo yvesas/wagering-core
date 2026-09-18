@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -233,6 +234,291 @@ func post(t *testing.T, url, payload string) (string, int) {
 	resp, err := http.Post(url, "application/json", strings.NewReader(payload))
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return string(body), resp.StatusCode
+}
+
+// TestIdempotencySurvivesARestart is the test the whole phase exists for.
+//
+// It sends an operation, tears the entire process graph down -- every pool,
+// every in-memory anything -- builds a brand new one against the same database,
+// and sends the identical request again. Nothing carried over in RAM, which is
+// the only honest way to show that idempotency lives in the database.
+//
+// It also checks the part that is easy to get wrong and passes every happy-path
+// test: the replay returns the balance observed at the time, not the balance
+// the wallet has now.
+func TestIdempotencySurvivesARestart(t *testing.T) {
+	suffix := time.Now().Format("150405.000000000")
+
+	// --- first process --------------------------------------------------
+	addr := freePort(t)
+	setTestEnv(t, addr)
+	first := fx.New(platform.Module, fx.NopLogger)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := first.Start(ctx); err != nil {
+		t.Fatalf("starting: %v", err)
+	}
+	base := "http://" + addr
+
+	walletID := openWallet(t, base, "player-restart-"+suffix, "100.00")
+
+	bet := fmt.Sprintf(`{
+	  "providerId":"provider-restart-%[1]s",
+	  "externalTransactionId":"tx-%[1]s",
+	  "playerId":"player-restart-%[1]s",
+	  "walletId":%[2]q,
+	  "roundId":"round-1",
+	  "gameId":"fortune-chimp",
+	  "kind":"BET",
+	  "money":{"amount":"25.00","currency":"BRL"}
+	}`, suffix, walletID)
+	key := "provider-restart-" + suffix + ":tx-" + suffix
+
+	body, status := submit(t, base, key, bet)
+	if status != http.StatusOK {
+		t.Fatalf("first submission: %d %s", status, body)
+	}
+	firstResult := decodeSubmit(t, body)
+	if firstResult.Balance.Amount != "75.00" || firstResult.Replay {
+		t.Fatalf("first submission: %+v", firstResult)
+	}
+
+	// Move the wallet, so "the balance now" and "the balance then" differ.
+	win := strings.ReplaceAll(bet, `"tx-`+suffix+`"`, `"tx-win-`+suffix+`"`)
+	win = strings.ReplaceAll(win, `"BET"`, `"WIN"`)
+	win = strings.ReplaceAll(win, `"25.00"`, `"500.00"`)
+	if body, status := submit(t, base, key+":win", win); status != http.StatusOK {
+		t.Fatalf("the intervening win: %d %s", status, body)
+	}
+
+	// --- tear the process down ------------------------------------------
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelStop()
+	if err := first.Stop(stopCtx); err != nil {
+		t.Fatalf("stopping: %v", err)
+	}
+
+	// --- a completely new process ---------------------------------------
+	secondAddr := freePort(t)
+	setTestEnv(t, secondAddr)
+	second := fx.New(platform.Module, fx.NopLogger)
+
+	if err := second.Start(ctx); err != nil {
+		t.Fatalf("restarting: %v", err)
+	}
+	defer func() {
+		if err := second.Stop(stopCtx); err != nil {
+			t.Errorf("stopping the second process: %v", err)
+		}
+	}()
+	restarted := "http://" + secondAddr
+
+	body, status = submit(t, restarted, key, bet)
+	if status != http.StatusOK {
+		t.Fatalf("the resend after the restart: %d %s", status, body)
+	}
+	replayed := decodeSubmit(t, body)
+
+	if !replayed.Replay {
+		t.Error("the restarted process did not recognise the operation")
+	}
+	if replayed.TransactionID != firstResult.TransactionID {
+		t.Error("the resend created a second transaction")
+	}
+	// The easy implementation returns the wallet's balance now -- 575.00 -- and
+	// passes every happy-path test. This is the assertion that catches it.
+	if replayed.Balance.Amount != "75.00" {
+		t.Fatalf("the replay returned %s, want the 75.00 observed at the time",
+			replayed.Balance.Amount)
+	}
+
+	// And the money moved exactly once.
+	wallet, status := get(t, restarted+"/wallets/"+walletID)
+	if status != http.StatusOK {
+		t.Fatalf("reading the wallet: %d %s", status, wallet)
+	}
+	if !strings.Contains(wallet, `"amount":"575.00"`) {
+		t.Fatalf("balance after the resend: %s", wallet)
+	}
+
+	ledger, _ := get(t, restarted+"/wallets/"+walletID+"/ledger")
+	// The opening credit, the bet and the win. A fourth would mean the resend
+	// moved money.
+	if got := strings.Count(ledger, `"direction"`); got != 3 {
+		t.Fatalf("got %d ledger entries, want 3: %s", got, ledger)
+	}
+}
+
+func TestKeyReusedWithDifferentContentIsRefused(t *testing.T) {
+	suffix := time.Now().Format("150405.000000000")
+	addr := freePort(t)
+	setTestEnv(t, addr)
+
+	application := fx.New(platform.Module, fx.NopLogger)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := application.Start(ctx); err != nil {
+		t.Fatalf("starting: %v", err)
+	}
+	defer application.Stop(ctx)
+
+	base := "http://" + addr
+	walletID := openWallet(t, base, "player-conflict-"+suffix, "1000.00")
+	key := "provider-conflict-" + suffix + ":key"
+
+	operation := func(external, amount string) string {
+		return fmt.Sprintf(`{
+		  "providerId":"provider-conflict-%[1]s",
+		  "externalTransactionId":%[2]q,
+		  "playerId":"player-conflict-%[1]s",
+		  "walletId":%[3]q,
+		  "roundId":"round-1",
+		  "gameId":"fortune-chimp",
+		  "kind":"BET",
+		  "money":{"amount":%[4]q,"currency":"BRL"}
+		}`, suffix, external, walletID, amount)
+	}
+
+	if body, status := submit(t, base, key, operation("tx-a-"+suffix, "25.00")); status != http.StatusOK {
+		t.Fatalf("first: %d %s", status, body)
+	}
+
+	// Same key, different operation.
+	body, status := submit(t, base, key, operation("tx-b-"+suffix, "99.00"))
+	if status != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", status, body)
+	}
+
+	// Same operation, a fresh key: still refused, because the pair
+	// (provider, externalId) is what identifies it.
+	body, status = submit(t, base, key+"-different", operation("tx-a-"+suffix, "25.00"))
+	if status != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", status, body)
+	}
+
+	wallet, _ := get(t, base+"/wallets/"+walletID)
+	if !strings.Contains(wallet, `"amount":"975.00"`) {
+		t.Fatalf("a refused submission moved money: %s", wallet)
+	}
+}
+
+func TestConcurrentDuplicatesMoveMoneyOnce(t *testing.T) {
+	suffix := time.Now().Format("150405.000000000")
+	addr := freePort(t)
+	setTestEnv(t, addr)
+
+	application := fx.New(platform.Module, fx.NopLogger)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := application.Start(ctx); err != nil {
+		t.Fatalf("starting: %v", err)
+	}
+	defer application.Stop(ctx)
+
+	base := "http://" + addr
+	walletID := openWallet(t, base, "player-race-"+suffix, "1000.00")
+
+	payload := fmt.Sprintf(`{
+	  "providerId":"provider-race-%[1]s",
+	  "externalTransactionId":"tx-%[1]s",
+	  "playerId":"player-race-%[1]s",
+	  "walletId":%[2]q,
+	  "roundId":"round-1",
+	  "gameId":"fortune-chimp",
+	  "kind":"BET",
+	  "money":{"amount":"25.00","currency":"BRL"}
+	}`, suffix, walletID)
+	key := "provider-race-" + suffix + ":tx-" + suffix
+
+	// Twenty copies of the same request, released together. The lookup before
+	// the insert cannot save this -- all twenty find nothing -- so what refuses
+	// nineteen of them is the uniqueness constraint.
+	const copies = 20
+	start := make(chan struct{})
+	statuses := make([]int, copies)
+	var wg sync.WaitGroup
+
+	for i := 0; i < copies; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, status := submit(t, base, key, payload)
+			statuses[i] = status
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, status := range statuses {
+		if status != http.StatusOK {
+			t.Errorf("copy %d answered %d; every copy should get the same result", i, status)
+		}
+	}
+
+	wallet, _ := get(t, base+"/wallets/"+walletID)
+	if !strings.Contains(wallet, `"amount":"975.00"`) {
+		t.Fatalf("twenty duplicates moved money more than once: %s", wallet)
+	}
+
+	ledger, _ := get(t, base+"/wallets/"+walletID+"/ledger")
+	if got := strings.Count(ledger, `"direction"`); got != 2 {
+		t.Fatalf("got %d ledger entries, want 2 (the opening and one debit)", got)
+	}
+}
+
+type submitBody struct {
+	TransactionID string `json:"transactionId"`
+	Status        string `json:"status"`
+	Balance       struct {
+		Amount string `json:"amount"`
+	} `json:"balance"`
+	Replay      bool   `json:"idempotentReplay"`
+	FailureCode string `json:"failureCode"`
+}
+
+func decodeSubmit(t *testing.T, body string) submitBody {
+	t.Helper()
+	var out submitBody
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("decoding %s: %v", body, err)
+	}
+	return out
+}
+
+func openWallet(t *testing.T, base, playerID, amount string) string {
+	t.Helper()
+	body, status := post(t, base+"/wallets", fmt.Sprintf(
+		`{"playerId":%q,"initialBalance":{"amount":%q,"currency":"BRL"}}`, playerID, amount))
+	if status != http.StatusCreated {
+		t.Fatalf("opening a wallet: %d %s", status, body)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(body), &created); err != nil {
+		t.Fatalf("decoding %s: %v", body, err)
+	}
+	return created.ID
+}
+
+func submit(t *testing.T, base, key, payload string) (string, int) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, base+"/wagering/transactions", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("building the request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", key)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("submitting: %v", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
