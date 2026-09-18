@@ -146,6 +146,13 @@ func (m *memoryWallets) UpdateBalance(_ context.Context, w domain.Wallet, expect
 	return ErrNotFound
 }
 
+// FindByIDForUpdate has nothing to lock here: the fake is single-threaded and
+// the unit of work already serialises. It exists so the use case can be tested
+// against the same port the real one implements.
+func (m *memoryWallets) FindByIDForUpdate(ctx context.Context, id domain.WalletID) (domain.Wallet, error) {
+	return m.FindByID(ctx, id)
+}
+
 func (m *memoryWallets) FindByID(_ context.Context, id domain.WalletID) (domain.Wallet, error) {
 	for _, w := range m.store.wallets {
 		if w.ID() == id {

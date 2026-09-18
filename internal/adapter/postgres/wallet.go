@@ -33,6 +33,22 @@ func (r *walletRepository) FindByPlayerAndCurrency(ctx context.Context, player d
 	return scanWallet(row)
 }
 
+// FindByIDForUpdate takes a row-level lock on the wallet.
+//
+// The lock is on one row, which is the whole point: wallet A never makes wallet
+// B wait, and that is what "independent wallets advance in parallel" means.
+//
+// A transaction locks exactly one wallet row and always the wallet, so there is
+// no lock-ordering cycle and therefore no deadlock. An operation that ever needs
+// two wallets has to take them in a deterministic order -- by identifier -- or
+// two opposite transfers will block each other at three in the morning.
+func (r *walletRepository) FindByIDForUpdate(ctx context.Context, id domain.WalletID) (domain.Wallet, error) {
+	row := r.q.QueryRow(ctx,
+		`SELECT `+walletColumns+` FROM wallets WHERE id = $1 FOR UPDATE`,
+		id.String())
+	return scanWallet(row)
+}
+
 func (r *walletRepository) Insert(ctx context.Context, wallet domain.Wallet) error {
 	if !wallet.IsInitialised() {
 		return fmt.Errorf("inserting an uninitialised wallet")
