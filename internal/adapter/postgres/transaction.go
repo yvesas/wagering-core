@@ -20,6 +20,7 @@ type transactionRepository struct {
 const transactionColumns = `id, origin, kind, status, wallet_id, player_id, ` +
 	`amount_minor, currency, provider_id, external_id, idempotency_key, payload_hash, ` +
 	`round_id, game_id, reference_external_id, resolved_reference_id, ` +
+	`reference_attempts, reference_next_attempt_at, reference_deadline_at, ` +
 	`failure_code, balance_after_minor, created_at, updated_at`
 
 func (r *transactionRepository) FindByID(ctx context.Context, id domain.TransactionID) (domain.WagerTransaction, error) {
@@ -41,6 +42,19 @@ func (r *transactionRepository) FindByBusinessID(ctx context.Context, provider d
 	return scanTransaction(row)
 }
 
+// FindProcessedReversalOf returns the successful reversal of an operation.
+//
+// At most one row can match: a partial unique index on resolved_reference_id,
+// restricted to PROCESSED, makes a second one impossible.
+func (r *transactionRepository) FindProcessedReversalOf(ctx context.Context, reference domain.TransactionID) (domain.WagerTransaction, error) {
+	row := r.q.QueryRow(ctx, `
+		SELECT `+transactionColumns+`
+		  FROM wager_transactions
+		 WHERE resolved_reference_id = $1 AND status = 'PROCESSED'`,
+		reference.String())
+	return scanTransaction(row)
+}
+
 func (r *transactionRepository) Insert(ctx context.Context, tx domain.WagerTransaction) error {
 	if !tx.IsInitialised() {
 		return fmt.Errorf("inserting an uninitialised transaction")
@@ -49,7 +63,7 @@ func (r *transactionRepository) Insert(ctx context.Context, tx domain.WagerTrans
 	_, err := r.q.Exec(ctx, `
 		INSERT INTO wager_transactions (`+transactionColumns+`)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-		        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
+		        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)`,
 		tx.ID().String(),
 		string(tx.Origin()),
 		string(tx.Kind()),
@@ -66,6 +80,9 @@ func (r *transactionRepository) Insert(ctx context.Context, tx domain.WagerTrans
 		nullable(tx.GameID().String()),
 		nullable(tx.ReferenceExternalID().String()),
 		nullable(tx.ResolvedReferenceID().String()),
+		tx.ReferenceAttempts(),
+		nullableTime(tx.ReferenceNextAttemptAt()),
+		nullableTime(tx.ReferenceDeadlineAt()),
 		nullable(string(tx.FailureCode())),
 		nullableMinor(tx.BalanceAfter()),
 		tx.CreatedAt(),
@@ -90,13 +107,19 @@ func (r *transactionRepository) Update(ctx context.Context, tx domain.WagerTrans
 		UPDATE wager_transactions
 		   SET status = $1,
 		       resolved_reference_id = $2,
-		       failure_code = $3,
-		       balance_after_minor = $4,
-		       updated_at = $5
-		 WHERE id = $6
+		       reference_attempts = $3,
+		       reference_next_attempt_at = $4,
+		       reference_deadline_at = $5,
+		       failure_code = $6,
+		       balance_after_minor = $7,
+		       updated_at = $8
+		 WHERE id = $9
 		   AND status NOT IN ('PROCESSED', 'REJECTED', 'FAILED')`,
 		string(tx.Status()),
 		nullable(tx.ResolvedReferenceID().String()),
+		tx.ReferenceAttempts(),
+		nullableTime(tx.ReferenceNextAttemptAt()),
+		nullableTime(tx.ReferenceDeadlineAt()),
 		nullable(string(tx.FailureCode())),
 		nullableMinor(tx.BalanceAfter()),
 		tx.UpdatedAt(),
@@ -134,6 +157,16 @@ func nullable(s string) *string {
 	return &s
 }
 
+// nullableTime writes an instant only when it was set. A zero time.Time written
+// as-is would land in the year 1, which a deadline comparison would then read
+// as "expired long ago".
+func nullableTime(at time.Time) *time.Time {
+	if at.IsZero() {
+		return nil
+	}
+	return &at
+}
+
 // nullableMinor writes a Money only when it was actually set. An operation that
 // has not been processed has no observed balance, and zero would be a lie.
 func nullableMinor(m domain.Money) *int64 {
@@ -155,12 +188,16 @@ func scanTransaction(row scanner) (domain.WagerTransaction, error) {
 		rawRound, rawGame, rawReference           *string
 		rawResolved, rawFailure                   *string
 		balanceAfterMinor                         *int64
+
+		referenceAttempts                int
+		nextAttemptAt, referenceDeadline *time.Time
 	)
 
 	if err := row.Scan(
 		&rawID, &rawOrigin, &rawKind, &rawStatus, &rawWallet, &rawPlayer,
 		&amountMinor, &rawCurrency, &rawProvider, &rawExternal, &rawKey, &rawHash,
 		&rawRound, &rawGame, &rawReference, &rawResolved,
+		&referenceAttempts, &nextAttemptAt, &referenceDeadline,
 		&rawFailure, &balanceAfterMinor, &createdAt, &updatedAt,
 	); err != nil {
 		return domain.WagerTransaction{}, translate(err)
@@ -176,13 +213,16 @@ func scanTransaction(row scanner) (domain.WagerTransaction, error) {
 	}
 
 	params := domain.RehydrateTransactionParams{
-		Origin:      domain.Origin(rawOrigin),
-		Kind:        domain.Kind(rawKind),
-		Status:      domain.Status(rawStatus),
-		Money:       amount,
-		FailureCode: domain.Code(deref(rawFailure)),
-		CreatedAt:   createdAt,
-		UpdatedAt:   updatedAt,
+		Origin:                 domain.Origin(rawOrigin),
+		Kind:                   domain.Kind(rawKind),
+		Status:                 domain.Status(rawStatus),
+		Money:                  amount,
+		ReferenceAttempts:      referenceAttempts,
+		ReferenceNextAttemptAt: derefTime(nextAttemptAt),
+		ReferenceDeadlineAt:    derefTime(referenceDeadline),
+		FailureCode:            domain.Code(deref(rawFailure)),
+		CreatedAt:              createdAt,
+		UpdatedAt:              updatedAt,
 	}
 
 	if params.ID, err = domain.ParseTransactionID(rawID); err != nil {
@@ -262,9 +302,57 @@ func parseOptional(raw *string, parse func(string) error) error {
 	return parse(*raw)
 }
 
+func derefTime(at *time.Time) time.Time {
+	if at == nil {
+		return time.Time{}
+	}
+	return *at
+}
+
 func deref(s *string) string {
 	if s == nil {
 		return ""
 	}
 	return *s
+}
+
+// ClaimDueReferences reserves pending reversals whose next attempt has come
+// round, and holds them until the transaction ends.
+//
+// SKIP LOCKED is what lets several workers run: a row another instance is
+// already holding is passed over rather than waited on, so two workers never
+// take the same pending item and neither blocks behind the other. Without it,
+// a second worker would queue up on the first one's row and the whole scan
+// would serialise.
+func (r *transactionRepository) ClaimDueReferences(ctx context.Context, now time.Time, limit int) ([]domain.WagerTransaction, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("limit must be positive, got %d", limit)
+	}
+
+	rows, err := r.q.Query(ctx, `
+		SELECT `+transactionColumns+`
+		  FROM wager_transactions
+		 WHERE status = 'PENDING_REFERENCE'
+		   AND reference_next_attempt_at <= $1
+		 ORDER BY reference_next_attempt_at
+		 LIMIT $2
+		 FOR UPDATE SKIP LOCKED`,
+		now, limit)
+	if err != nil {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+
+	var claimed []domain.WagerTransaction
+	for rows.Next() {
+		transaction, err := scanTransaction(rows)
+		if err != nil {
+			return nil, err
+		}
+		claimed = append(claimed, transaction)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, translate(err)
+	}
+	return claimed, nil
 }
