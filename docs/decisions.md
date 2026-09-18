@@ -12,6 +12,12 @@
 | 2026-09-18 | Requisitos com ID versionados em `specs/project/REQUIREMENTS.md` | Precisam viajar no clone para o `spec.md` de cada feature poder citá-los. Ficariam órfãos fora do repositório. |
 | 2026-09-18 | Plano, ordem das tarefas e andamento fora do repositório | Plano e verdade no mesmo arquivo envelhecem juntos e ninguém confia em nenhum dos dois. O repositório guarda o produto; a pasta de controle, a execução. |
 | 2026-09-18 | Convenções de Go no `CLAUDE.md` do projeto | A rule `code-style.md` do baseline é de TypeScript e não se edita dentro de um projeto — a próxima instalação sobrescreve. O `CLAUDE.md` é o arquivo que o instalador nunca toca. |
+| 2026-09-18 | Registro de entrada e domínio no mesmo commit (F7.1) | ADR 0009. Obrigou `ExecuteIn`, a forma do caso de uso que roda na transação de quem chama. As duas portas compartilham o mesmo código. |
+| 2026-09-18 | Identidade é o `messageId` do envelope | O id do SQS muda em redrive, o que faria reentrega parecer mensagem nova. |
+| 2026-09-18 | Commit primeiro, apagar depois | Apagar antes perde a operação; apagar depois pode duplicar, e é isso que o registro de entrada absorve. |
+| 2026-09-18 | `maxReceiveCount` é do broker, não nosso | Contador nosso estaria em dois lugares e discordaria no primeiro reinício. |
+| 2026-09-18 | `MessageGroupId` é a carteira | Mesma granularidade da coordenação. Por provedor serializaria todas as carteiras dele. |
+| 2026-09-18 | Tag do LocalStack fixada em 3.8 | `latest` virou a imagem licenciada: a build passou a falhar com "License activation failed" num dia em que nada no repositório mudou. |
 | 2026-09-18 | Uma reversão por operação, de qualquer tipo (F6.1) | ADR 0008. "Não duas do mesmo tipo" deixa `REFUND` + `ROLLBACK` devolverem o mesmo dinheiro duas vezes. Imposto por índice único parcial. |
 | 2026-09-18 | Direção da reversão derivada do tipo referenciado | Tabela escrita à mão seria segunda opinião sobre o que uma aposta faz. |
 | 2026-09-18 | `REVERSAL_EXCEEDS_BALANCE` separado de `INSUFFICIENT_FUNDS` | Aposta sem saldo é rotina; reversão que não cabe é dinheiro já entregue que não volta, e precisa de gente olhando. Código igual perderia o segundo no volume do primeiro. |
