@@ -52,6 +52,12 @@ para o log junto do `correlationId`.
 | Erro interno | 500 | `INTERNAL` |
 | Falha transitória; vale repetir | 503 | `TRY_AGAIN` |
 | Operação válida que este build ainda não serve | 501 | `NOT_IMPLEMENTED` |
+| Referência não chegou no prazo | 422 | `REFERENCE_NOT_FOUND` |
+| Referência diverge da reversão | 422 | `REFERENCE_MISMATCH` |
+| Valor da reversão diferente do referenciado | 422 | `REFERENCE_AMOUNT_MISMATCH` |
+| Referenciado não é reversível | 422 | `REFERENCE_NOT_REVERSIBLE` |
+| Já existe reversão bem-sucedida | 422 | `ALREADY_REVERSED` |
+| Reversão não cabe no saldo | 422 | `REVERSAL_EXCEEDS_BALANCE` |
 | Chave de idempotência usada por outra operação | 409 | `IDEMPOTENCY_KEY_REUSED` |
 
 O mapa completo de código de domínio para status vive em
@@ -168,14 +174,59 @@ Idempotency-Key: provider-a:transaction-123
 }
 ```
 
-### O que está implementado
+### Os tipos
 
 `BET` debita, `WIN` credita, `LOSS` exige `"0.00"` e não movimenta nada — sem
 lançamento e sem incrementar a versão da carteira.
 
-**`REFUND` e `ROLLBACK` respondem 501.** Eles precisam resolver a referência
-antes de aplicar, e essa parte ainda não existe. Dizer isso é melhor que aceitar
-a operação e fazer outra coisa com ela em silêncio.
+`REFUND` e `ROLLBACK` são reversões e exigem
+`referenceExternalTransactionId`. O movimento é sempre o **oposto** do que a
+operação referenciada fez:
+
+| Reversão | Pode referenciar | Movimento |
+|---|---|---|
+| `REFUND` | `BET` | crédito |
+| `ROLLBACK` | `BET` | crédito |
+| `ROLLBACK` | `WIN` | débito |
+| `ROLLBACK` | `REFUND` | débito |
+
+**Cada operação admite no máximo uma reversão bem-sucedida, de qualquer tipo.**
+Não "uma por tipo": um `REFUND` e depois um `ROLLBACK` da mesma aposta são tipos
+diferentes e devolveriam o mesmo dinheiro duas vezes. A segunda recebe
+`ALREADY_REVERSED`.
+
+Reverter um `REFUND` continua permitido e **não** é reverter a aposta de novo: o
+`ROLLBACK` aponta para o id da devolução, cada operação foi revertida uma vez, e
+o saldo acaba onde uma aposta nunca devolvida deixaria.
+
+### Quando a referência ainda não chegou
+
+A entrega não tem ordem, então uma reversão pode ultrapassar o que ela desfaz.
+Nesse caso a resposta é **202** com `status: "PENDING_REFERENCE"` — nada se moveu
+ainda, e ainda pode. Um worker tenta de novo com backoff exponencial, e a espera
+sobrevive a reinício porque o estado está em coluna, não em memória.
+
+Esgotado o prazo ou o número de tentativas, a reversão vira `REJECTED` com
+`REFERENCE_NOT_FOUND`.
+
+| Situação do referenciado | Resposta |
+|---|---|
+| Não existe ainda | 202 `PENDING_REFERENCE` |
+| Existe, ainda não terminou | 202 `PENDING_REFERENCE` |
+| `REJECTED` ou `FAILED` | 422 `REFERENCE_NOT_REVERSIBLE` — nunca moveu dinheiro |
+| Tipo não reversível por esta reversão | 422 `REFERENCE_NOT_REVERSIBLE` |
+| Diverge em jogador, carteira, moeda ou rodada | 422 `REFERENCE_MISMATCH` |
+| Valor diferente | 422 `REFERENCE_AMOUNT_MISMATCH` |
+| Já revertido | 422 `ALREADY_REVERSED` |
+| Reversão não cabe no saldo | 422 `REVERSAL_EXCEEDS_BALANCE` |
+
+`REVERSAL_EXCEEDS_BALANCE` é **deliberadamente diferente** de
+`INSUFFICIENT_FUNDS`. Uma aposta sem saldo é o jogador tentando gastar o que não
+tem, e é rotina. Uma reversão que não cabe é dinheiro **já entregue** que não
+pode ser recolhido — problema de reconciliação, não limite de jogo, e alguém
+precisa olhar. Código igual perderia o segundo no volume do primeiro.
+
+Detalhes em [`docs/adr/0008-reversals.md`](adr/0008-reversals.md).
 
 ### Idempotência
 

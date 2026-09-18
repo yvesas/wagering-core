@@ -3,9 +3,10 @@
 > Este documento descreve o que **existe**, não o que está planejado. O desenho
 > pretendido vive em `specs/project/PROJECT.md` e no `spec.md` de cada feature.
 >
-> **Estado atual:** domínio, persistência, abertura e envio de operação com
-> idempotência persistente e coordenação por carteira, e a borda HTTP composta
-> por Fx. Não há fila, autenticação nem reversões.
+> **Estado atual:** domínio, persistência, os cinco tipos de operação com
+> reversões e resolução de referência, idempotência persistente, coordenação por
+> carteira, a borda HTTP e o worker de pendências, compostos por Fx. Não há fila,
+> autenticação nem reconciliação.
 
 ## O que existe
 
@@ -253,9 +254,47 @@ Com um só recurso travado não há ciclo, então não há deadlock por ordenaç
 Isso constrange o código futuro: uma operação que precise de duas carteiras terá
 de travá-las por identificador crescente.
 
+## Reversões
+
+`REFUND` desfaz uma aposta; `ROLLBACK` desfaz aposta, ganho ou devolução. **A
+direção do movimento é derivada do tipo referenciado**, não configurada: uma
+tabela escrita à mão seria uma segunda opinião sobre o que uma aposta faz.
+
+**Uma reversão bem-sucedida por operação, de qualquer tipo.** O requisito mínimo
+é "não duas do mesmo tipo", e isso deixa a porta aberta: `REFUND` e depois
+`ROLLBACK` da mesma aposta devolveriam o mesmo dinheiro duas vezes. A regra forte
+é imposta por índice único parcial em `resolved_reference_id`, restrito a
+reversões `PROCESSED` — no banco, do mesmo jeito que a idempotência.
+
+Reverter um `REFUND` continua valendo, e é diferente de reverter a aposta de
+novo. A distinção é sutil e é toda a regra.
+
+**Referência pendente espera; terminal-sem-sucesso rejeita.** Uma operação ainda
+`PENDING` pode virar `PROCESSED`, e rejeitar agora seria decidir cedo demais. Uma
+`REJECTED` nunca moveu dinheiro, e esperar seria esperar para sempre.
+
+A espera tem **TTL e número máximo de tentativas**, os dois: só tentativas é
+frágil com backoff exponencial, e só TTL gera consultas inúteis. Ver
+`docs/adr/0008-reversals.md`.
+
+## O worker de pendências
+
+Varre reversões cujo próximo instante de tentativa já passou, reservando com
+`FOR UPDATE SKIP LOCKED` — duas instâncias nunca pegam a mesma pendência e
+nenhuma espera a outra.
+
+**Uma pendência por transação.** Isso não é otimização, é a regra de deadlock do
+ADR 0007: uma transação trava exatamente uma linha de carteira. Reservar vinte
+pendências de vinte carteiras num commit só tomaria vinte locks na ordem que a
+varredura devolvesse, e dois workers acabariam tomando dois deles em ordens
+opostas.
+
+O estado da espera vive em coluna, então um reinício encontra o trabalho onde
+parou.
+
 ## O que os testes provam
 
-407 casos no total. `-race` limpo, inclusive nos cenários multi-processo.
+436 casos no total. `-race` limpo, inclusive nos cenários multi-processo.
 
 Os cenários de concorrência rodam em **três processos independentes**, não em
 goroutines. Goroutines compartilham pool e memória: provam que o código é seguro
@@ -278,6 +317,11 @@ Três guardas valem menção porque protegem invariante:
 - **Cinquenta cópias idênticas** em três processos: um débito, versão 2.
 - **Quarenta apostas distintas numa carteira**: todas passam. Removendo o
   `FOR UPDATE`, esse é o teste que falha — com 409, não com saldo errado.
+- **Uma reversão que ultrapassa o que desfaz** é parqueada, a aposta chega, e o
+  worker — possivelmente em outro processo — conclui.
+- **Um `REFUND` e um `ROLLBACK` da mesma aposta**, soltos juntos em instâncias
+  diferentes: um aplica, o outro recebe `ALREADY_REVERSED`, e os 25,00 voltam
+  uma vez.
 - Toda cena termina conferindo saldo armazenado contra créditos menos débitos,
   em unidades mínimas: usar float na verificação faria ela depender do que está
   verificando.
@@ -310,6 +354,6 @@ créditos menos débitos.
 
 ## O que ainda não existe
 
-Reversões (`REFUND`, `ROLLBACK`, que hoje respondem 501), fila, outbox,
-autenticação, métricas e reconciliação. A ordem em que entram está no plano de ação, fora do
+Fila com registro de entrada, publicação por registro de saída, autenticação
+OIDC, métricas e reconciliação. A ordem em que entram está no plano de ação, fora do
 repositório.

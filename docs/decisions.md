@@ -12,6 +12,11 @@
 | 2026-09-18 | Requisitos com ID versionados em `specs/project/REQUIREMENTS.md` | Precisam viajar no clone para o `spec.md` de cada feature poder citá-los. Ficariam órfãos fora do repositório. |
 | 2026-09-18 | Plano, ordem das tarefas e andamento fora do repositório | Plano e verdade no mesmo arquivo envelhecem juntos e ninguém confia em nenhum dos dois. O repositório guarda o produto; a pasta de controle, a execução. |
 | 2026-09-18 | Convenções de Go no `CLAUDE.md` do projeto | A rule `code-style.md` do baseline é de TypeScript e não se edita dentro de um projeto — a próxima instalação sobrescreve. O `CLAUDE.md` é o arquivo que o instalador nunca toca. |
+| 2026-09-18 | Uma reversão por operação, de qualquer tipo (F6.1) | ADR 0008. "Não duas do mesmo tipo" deixa `REFUND` + `ROLLBACK` devolverem o mesmo dinheiro duas vezes. Imposto por índice único parcial. |
+| 2026-09-18 | Direção da reversão derivada do tipo referenciado | Tabela escrita à mão seria segunda opinião sobre o que uma aposta faz. |
+| 2026-09-18 | `REVERSAL_EXCEEDS_BALANCE` separado de `INSUFFICIENT_FUNDS` | Aposta sem saldo é rotina; reversão que não cabe é dinheiro já entregue que não volta, e precisa de gente olhando. Código igual perderia o segundo no volume do primeiro. |
+| 2026-09-18 | Espera com TTL **e** limite de tentativas | Só tentativas é frágil com backoff exponencial; só TTL gera consultas inúteis. |
+| 2026-09-18 | Worker processa uma pendência por transação | Consequência da regra de deadlock do ADR 0007: uma transação trava uma linha de carteira. |
 | 2026-09-18 | Lock pessimista por linha de carteira, não otimista puro (F5.1) | ADR 0007. Medido: sem o `FOR UPDATE`, quarenta apostas distintas numa carteira recusam boa parte com 409. O dinheiro fica certo — a versão pega tudo — e a disponibilidade quebra sob carga. |
 | 2026-09-18 | Versão mantida como segunda garantia | O `FOR UPDATE` protege quem passou por ele; um caso de uso futuro que leia sem travar não é protegido por nada. |
 | 2026-09-18 | Retry no unit of work, com jitter | É o único lugar que vê a transação inteira. Sem jitter, quem colidiu junto dorme junto e colide de novo no mesmo instante. |

@@ -21,12 +21,13 @@ repositório, na pasta de controle ao lado.
 | 1 | Núcleo de domínio: valor monetário, carteira, ledger, transação | pronta |
 | 2 | Persistência, migrations e constraints | pronta |
 | 3 | Abertura de carteira, HTTP e composição por DI | pronta |
-| 4 | Idempotência persistente e replay | a fazer |
-| 5 | Concorrência por carteira | a fazer |
+| 4 | Idempotência persistente e replay | pronta |
+| 5 | Concorrência por carteira | pronta |
 
-Fases 6 a 10 — operações e reversões, consumo por fila, publicação por registro
-de saída, autenticação, observabilidade — estão especificadas em
-`specs/project/REQUIREMENTS.md` e entram depois que o núcleo estiver provado.
+| 6 | Reversões e resolução de referência | pronta |
+
+Fases 7 a 10 — consumo por fila, publicação por registro de saída, autenticação,
+observabilidade — estão especificadas em `specs/project/REQUIREMENTS.md`.
 
 ## Pré-requisitos
 
