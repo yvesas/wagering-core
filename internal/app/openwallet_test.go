@@ -94,6 +94,7 @@ type memoryStore struct {
 	wallets      []domain.Wallet
 	transactions []domain.WagerTransaction
 	entries      []domain.LedgerEntry
+	inbox        []InboxMessage
 
 	failOnInsertWallet error
 	failOnInsertTx     error
@@ -106,6 +107,7 @@ func (s *memoryStore) clone() *memoryStore {
 		wallets:            append([]domain.Wallet(nil), s.wallets...),
 		transactions:       append([]domain.WagerTransaction(nil), s.transactions...),
 		entries:            append([]domain.LedgerEntry(nil), s.entries...),
+		inbox:              append([]InboxMessage(nil), s.inbox...),
 		failOnInsertWallet: s.failOnInsertWallet,
 		failOnInsertTx:     s.failOnInsertTx,
 	}
@@ -128,6 +130,7 @@ func (u *memoryUnitOfWork) Do(ctx context.Context, fn func(context.Context, Repo
 	u.store.wallets = staged.wallets
 	u.store.transactions = staged.transactions
 	u.store.entries = staged.entries
+	u.store.inbox = staged.inbox
 	u.store.commits++
 	return nil
 }
@@ -144,6 +147,41 @@ type memoryRepositories struct{ store *memoryStore }
 func (r *memoryRepositories) Wallets() WalletRepository           { return &memoryWallets{store: r.store} }
 func (r *memoryRepositories) Ledger() LedgerRepository            { return &memoryLedger{store: r.store} }
 func (r *memoryRepositories) Transactions() TransactionRepository { return &memoryTx{store: r.store} }
+func (r *memoryRepositories) Inbox() InboxRepository              { return &memoryInbox{store: r.store} }
+
+// memoryInbox enforces the same uniqueness the schema does, because that
+// constraint is the deduplication: a fake without it would let a test pass
+// while the real duplicate delivery went straight through.
+type memoryInbox struct{ store *memoryStore }
+
+func (m *memoryInbox) Claim(_ context.Context, message InboxMessage) error {
+	for _, seen := range m.store.inbox {
+		if seen.ConsumerName == message.ConsumerName && seen.MessageID == message.MessageID {
+			return NewConflict("inbox_messages_identity")
+		}
+	}
+	m.store.inbox = append(m.store.inbox, message)
+	return nil
+}
+
+func (m *memoryInbox) Complete(_ context.Context, consumerName, messageID string, at time.Time) error {
+	for i, seen := range m.store.inbox {
+		if seen.ConsumerName == consumerName && seen.MessageID == messageID {
+			m.store.inbox[i].CompletedAt = at
+			return nil
+		}
+	}
+	return ErrNotFound
+}
+
+func (m *memoryInbox) Find(_ context.Context, consumerName, messageID string) (InboxMessage, error) {
+	for _, seen := range m.store.inbox {
+		if seen.ConsumerName == consumerName && seen.MessageID == messageID {
+			return seen, nil
+		}
+	}
+	return InboxMessage{}, ErrNotFound
+}
 
 type memoryWallets struct{ store *memoryStore }
 

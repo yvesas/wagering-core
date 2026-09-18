@@ -124,6 +124,7 @@ type Repositories interface {
 	Wallets() WalletRepository
 	Ledger() LedgerRepository
 	Transactions() TransactionRepository
+	Inbox() InboxRepository
 }
 
 // Queries is read-only access outside any transaction, for the lookups that do
