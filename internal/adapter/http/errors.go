@@ -43,8 +43,20 @@ var domainStatus = map[domain.Code]int{
 	// The request was understood and a business rule refused it. Resending it
 	// unchanged will be refused again, but it was not malformed.
 	domain.CodeInsufficientFunds: http.StatusUnprocessableEntity,
-	domain.CodeInvalidTransition: http.StatusConflict,
-	domain.CodeInvalidStatus:     http.StatusConflict,
+
+	// Reversal refusals. All of them are recorded outcomes, so they normally
+	// reach a client through the transaction's status rather than as an error;
+	// the mapping exists because a code without one would fall through to 500.
+	domain.CodeReferenceNotFound:       http.StatusUnprocessableEntity,
+	domain.CodeReferenceMismatch:       http.StatusUnprocessableEntity,
+	domain.CodeReferenceAmountMismatch: http.StatusUnprocessableEntity,
+	domain.CodeReferenceNotReversible:  http.StatusUnprocessableEntity,
+	domain.CodeAlreadyReversed:         http.StatusUnprocessableEntity,
+	// Money already handed over that cannot be taken back. Deliberately its own
+	// code, and not INSUFFICIENT_FUNDS: this one needs a person to look.
+	domain.CodeReversalExceedsBalance: http.StatusUnprocessableEntity,
+	domain.CodeInvalidTransition:      http.StatusConflict,
+	domain.CodeInvalidStatus:          http.StatusConflict,
 
 	// The stored state is inconsistent with what the domain allows. This is a
 	// bug on our side, not a bad request.

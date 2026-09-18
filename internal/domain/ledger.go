@@ -14,6 +14,14 @@ const (
 // value is not, which is what keeps an unset field from passing as a debit.
 func (d Direction) Valid() bool { return d == Debit || d == Credit }
 
+// Opposite is which way undoing this movement goes.
+func (d Direction) Opposite() Direction {
+	if d == Debit {
+		return Credit
+	}
+	return Debit
+}
+
 // LedgerEntryParams carries what a ledger entry needs. It is a struct rather
 // than eight positional arguments because two of them are Money and three are
 // identifiers: at that point the compiler stops catching a swapped pair.

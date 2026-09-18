@@ -378,7 +378,7 @@ func TestTransitionsFromPending(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		parked, err := tx.MarkPendingReference(at(t))
+		parked, err := tx.MarkPendingReference(at(t), at(t).Add(time.Second), at(t).Add(time.Hour))
 		if err != nil {
 			t.Fatalf("MarkPendingReference: %v", err)
 		}
@@ -394,7 +394,7 @@ func TestOnlyReversalsWaitOnAReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.MarkPendingReference(at(t)); !errors.Is(err, ErrInvalidTransition) {
+	if _, err := tx.MarkPendingReference(at(t), at(t).Add(time.Second), at(t).Add(time.Hour)); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("error = %v, want ErrInvalidTransition", err)
 	}
 }
@@ -818,5 +818,185 @@ func TestRehydrateExternalReversalReferenceRules(t *testing.T) {
 	bet.Kind = KindBet
 	if _, err := RehydrateTransaction(bet); !errors.Is(err, ErrUnexpectedReference) {
 		t.Errorf("bet with a reference: error = %v, want ErrUnexpectedReference", err)
+	}
+}
+
+func TestKindDirection(t *testing.T) {
+	t.Parallel()
+	for kind, want := range map[Kind]struct {
+		direction Direction
+		moves     bool
+	}{
+		KindOpening:  {Credit, true},
+		KindBet:      {Debit, true},
+		KindWin:      {Credit, true},
+		KindRefund:   {Credit, true},
+		KindLoss:     {"", false},
+		KindRollback: {"", false},
+	} {
+		direction, moves := kind.Direction()
+		if moves != want.moves || direction != want.direction {
+			t.Errorf("%s.Direction() = (%q, %v), want (%q, %v)",
+				kind, direction, moves, want.direction, want.moves)
+		}
+	}
+}
+
+func TestCanReverse(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		reversal, target Kind
+		want             bool
+	}{
+		{KindRefund, KindBet, true},
+		{KindRollback, KindBet, true},
+		{KindRollback, KindWin, true},
+		{KindRollback, KindRefund, true},
+
+		// A refund returns a bet and nothing else.
+		{KindRefund, KindWin, false},
+		{KindRefund, KindRefund, false},
+		{KindRefund, KindRollback, false},
+
+		// LOSS moved nothing, so there is nothing to undo. OPENING is internal,
+		// and reversing it would be deleting a wallet by another name.
+		{KindRollback, KindLoss, false},
+		{KindRefund, KindLoss, false},
+		{KindRollback, KindOpening, false},
+		{KindRefund, KindOpening, false},
+
+		// Rolling back a rollback would reapply the original by a longer route.
+		{KindRollback, KindRollback, false},
+
+		// Kinds that are not reversals reverse nothing.
+		{KindBet, KindWin, false},
+		{KindWin, KindBet, false},
+		{KindLoss, KindBet, false},
+	}
+	for _, tc := range tests {
+		if got := tc.reversal.CanReverse(tc.target); got != tc.want {
+			t.Errorf("%s.CanReverse(%s) = %v, want %v", tc.reversal, tc.target, got, tc.want)
+		}
+	}
+}
+
+func TestReversalDirectionIsTheOpposite(t *testing.T) {
+	t.Parallel()
+	// Derived from the target's own direction, never from a hand-written table:
+	// a second table would be a second opinion about what a bet does.
+	for target, want := range map[Kind]Direction{
+		KindBet:    Credit,
+		KindWin:    Debit,
+		KindRefund: Debit,
+	} {
+		got, err := ReversalDirection(target)
+		if err != nil {
+			t.Fatalf("ReversalDirection(%s): %v", target, err)
+		}
+		if got != want {
+			t.Errorf("ReversalDirection(%s) = %q, want %q", target, got, want)
+		}
+	}
+
+	for _, target := range []Kind{KindLoss, KindRollback} {
+		if _, err := ReversalDirection(target); !errors.Is(err, ErrReferenceNotReversible) {
+			t.Errorf("ReversalDirection(%s) = %v, want ErrReferenceNotReversible", target, err)
+		}
+	}
+}
+
+func TestPendingReferenceCarriesItsSchedule(t *testing.T) {
+	t.Parallel()
+	p := externalParams(t)
+	p.Kind = KindRefund
+	p.ReferenceExternalID = externalID(t, "transaction-1")
+	tx, err := NewExternalTransaction(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	next := at(t).Add(5 * time.Second)
+	deadline := at(t).Add(time.Hour)
+
+	parked, err := tx.MarkPendingReference(at(t), next, deadline)
+	if err != nil {
+		t.Fatalf("MarkPendingReference: %v", err)
+	}
+	if parked.ReferenceAttempts() != 1 {
+		t.Errorf("attempts = %d, want 1", parked.ReferenceAttempts())
+	}
+	if !parked.ReferenceNextAttemptAt().Equal(next) || !parked.ReferenceDeadlineAt().Equal(deadline) {
+		t.Errorf("schedule = %v / %v", parked.ReferenceNextAttemptAt(), parked.ReferenceDeadlineAt())
+	}
+
+	// A wait with no schedule would be a row the worker never picks up.
+	if _, err := tx.MarkPendingReference(at(t), time.Time{}, deadline); !errors.Is(err, ErrInvalidTimestamp) {
+		t.Errorf("no next attempt: error = %v, want ErrInvalidTimestamp", err)
+	}
+}
+
+func TestRescheduleReferenceCountsAttempts(t *testing.T) {
+	t.Parallel()
+	p := externalParams(t)
+	p.Kind = KindRollback
+	p.ReferenceExternalID = externalID(t, "transaction-1")
+	tx, err := NewExternalTransaction(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := at(t).Add(time.Hour)
+	parked, err := tx.MarkPendingReference(at(t), at(t).Add(time.Second), deadline)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := parked.RescheduleReference(at(t).Add(time.Second), at(t).Add(4*time.Second))
+	if err != nil {
+		t.Fatalf("RescheduleReference: %v", err)
+	}
+	if again.ReferenceAttempts() != 2 {
+		t.Errorf("attempts = %d, want 2", again.ReferenceAttempts())
+	}
+	// Still waiting: rescheduling is not a transition, and the state machine
+	// has no self-edge.
+	if again.Status() != StatusPendingReference {
+		t.Errorf("status = %q", again.Status())
+	}
+	// The deadline is not moved by a reschedule. Extending it on every attempt
+	// would make the TTL meaningless.
+	if !again.ReferenceDeadlineAt().Equal(deadline) {
+		t.Errorf("the deadline moved to %v", again.ReferenceDeadlineAt())
+	}
+
+	if _, err := tx.RescheduleReference(at(t), at(t)); !errors.Is(err, ErrInvalidTransition) {
+		t.Errorf("rescheduling something that is not waiting: error = %v", err)
+	}
+}
+
+func TestReferenceDeadlinePassed(t *testing.T) {
+	t.Parallel()
+	p := externalParams(t)
+	p.Kind = KindRefund
+	p.ReferenceExternalID = externalID(t, "transaction-1")
+	tx, err := NewExternalTransaction(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := at(t).Add(time.Hour)
+	parked, err := tx.MarkPendingReference(at(t), at(t).Add(time.Second), deadline)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if parked.ReferenceDeadlinePassed(deadline.Add(-time.Second)) {
+		t.Error("the deadline passed early")
+	}
+	if !parked.ReferenceDeadlinePassed(deadline) {
+		t.Error("the deadline did not pass at the deadline")
+	}
+	// Something that never waited has no deadline to pass.
+	if tx.ReferenceDeadlinePassed(deadline.Add(time.Hour)) {
+		t.Error("a transaction that never waited reported an expired deadline")
 	}
 }

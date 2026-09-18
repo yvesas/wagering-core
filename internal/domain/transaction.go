@@ -136,6 +136,13 @@ type WagerTransaction struct {
 	// it is the stable code a provider branches on.
 	failureCode Code
 
+	// The wait for a reference. These live on the row rather than in a
+	// worker's memory, so a process that restarts finds the pending work where
+	// it left it.
+	referenceAttempts      int
+	referenceNextAttemptAt time.Time
+	referenceDeadlineAt    time.Time
+
 	// balanceAfter is the balance observed when the operation was processed.
 	// A replay returns this, not the balance the wallet has now — the wallet
 	// may well have moved on since.
@@ -311,13 +318,53 @@ func (t WagerTransaction) ReferenceExternalID() ExternalTransactionID {
 func (t WagerTransaction) ResolvedReferenceID() TransactionID { return t.resolvedReferenceID }
 
 // MarkPendingReference parks a reversal whose target has not arrived.
-func (t WagerTransaction) MarkPendingReference(at time.Time) (WagerTransaction, error) {
+//
+// The schedule is passed in rather than computed here: backoff and jitter are
+// policy, and the domain has no business owning a clock or a random source.
+func (t WagerTransaction) MarkPendingReference(at, nextAttemptAt, deadlineAt time.Time) (WagerTransaction, error) {
 	if !t.kind.IsReversal() {
 		return WagerTransaction{}, fail(CodeInvalidTransition,
 			"%s never waits on a reference", t.kind)
 	}
-	return t.transition(StatusPendingReference, at, func(next *WagerTransaction) {})
+	if nextAttemptAt.IsZero() || deadlineAt.IsZero() {
+		return WagerTransaction{}, fail(CodeInvalidTimestamp,
+			"a wait needs both a next attempt and a deadline")
+	}
+	return t.transition(StatusPendingReference, at, func(next *WagerTransaction) {
+		next.referenceAttempts++
+		next.referenceNextAttemptAt = nextAttemptAt.UTC()
+		next.referenceDeadlineAt = deadlineAt.UTC()
+	})
 }
+
+// RescheduleReference records another failed lookup and when to try again.
+//
+// It stays in PENDING_REFERENCE, so it is not a transition -- the state machine
+// has no self-edge and adding one would make "terminal" harder to reason about.
+func (t WagerTransaction) RescheduleReference(at, nextAttemptAt time.Time) (WagerTransaction, error) {
+	if t.status != StatusPendingReference {
+		return WagerTransaction{}, fail(CodeInvalidTransition,
+			"%s is not waiting on a reference", t.status)
+	}
+	if at.IsZero() || nextAttemptAt.IsZero() {
+		return WagerTransaction{}, fail(CodeInvalidTimestamp, "reschedule needs both instants")
+	}
+
+	next := t
+	next.referenceAttempts++
+	next.referenceNextAttemptAt = nextAttemptAt.UTC()
+	next.updatedAt = at.UTC()
+	return next, nil
+}
+
+// ReferenceDeadlinePassed reports whether the wait is over.
+func (t WagerTransaction) ReferenceDeadlinePassed(now time.Time) bool {
+	return !t.referenceDeadlineAt.IsZero() && !now.Before(t.referenceDeadlineAt)
+}
+
+func (t WagerTransaction) ReferenceAttempts() int            { return t.referenceAttempts }
+func (t WagerTransaction) ReferenceNextAttemptAt() time.Time { return t.referenceNextAttemptAt }
+func (t WagerTransaction) ReferenceDeadlineAt() time.Time    { return t.referenceDeadlineAt }
 
 // ResolveReference records the internal transaction a reversal turned out to
 // name. It does not itself move the status: resolving tells the caller what to
@@ -445,6 +492,10 @@ type RehydrateTransactionParams struct {
 	ReferenceExternalID ExternalTransactionID
 	ResolvedReferenceID TransactionID
 
+	ReferenceAttempts      int
+	ReferenceNextAttemptAt time.Time
+	ReferenceDeadlineAt    time.Time
+
 	FailureCode  Code
 	BalanceAfter Money
 
@@ -510,24 +561,88 @@ func RehydrateTransaction(p RehydrateTransactionParams) (WagerTransaction, error
 	}
 
 	return WagerTransaction{
-		id:                  p.ID,
-		origin:              p.Origin,
-		kind:                p.Kind,
-		status:              p.Status,
-		walletID:            p.WalletID,
-		playerID:            p.PlayerID,
-		money:               p.Money,
-		providerID:          p.ProviderID,
-		externalID:          p.ExternalID,
-		idempotencyKey:      p.IdempotencyKey,
-		payloadHash:         p.PayloadHash,
-		roundID:             p.RoundID,
-		gameID:              p.GameID,
-		referenceExternalID: p.ReferenceExternalID,
-		resolvedReferenceID: p.ResolvedReferenceID,
-		failureCode:         p.FailureCode,
-		balanceAfter:        p.BalanceAfter,
-		createdAt:           p.CreatedAt.UTC(),
-		updatedAt:           p.UpdatedAt.UTC(),
+		id:                     p.ID,
+		origin:                 p.Origin,
+		kind:                   p.Kind,
+		status:                 p.Status,
+		walletID:               p.WalletID,
+		playerID:               p.PlayerID,
+		money:                  p.Money,
+		providerID:             p.ProviderID,
+		externalID:             p.ExternalID,
+		idempotencyKey:         p.IdempotencyKey,
+		payloadHash:            p.PayloadHash,
+		roundID:                p.RoundID,
+		gameID:                 p.GameID,
+		referenceExternalID:    p.ReferenceExternalID,
+		resolvedReferenceID:    p.ResolvedReferenceID,
+		referenceAttempts:      p.ReferenceAttempts,
+		referenceNextAttemptAt: utcOrZero(p.ReferenceNextAttemptAt),
+		referenceDeadlineAt:    utcOrZero(p.ReferenceDeadlineAt),
+		failureCode:            p.FailureCode,
+		balanceAfter:           p.BalanceAfter,
+		createdAt:              p.CreatedAt.UTC(),
+		updatedAt:              p.UpdatedAt.UTC(),
 	}, nil
+}
+
+// Direction is which way a processed operation of this kind moves money. The
+// second return is false for a kind that moves nothing.
+//
+// This is the single definition, and the reversal rules derive from it rather
+// than repeating it. A hand-written table of reversal directions would be a
+// second source of truth about what a bet does.
+func (k Kind) Direction() (Direction, bool) {
+	switch k {
+	case KindOpening, KindWin, KindRefund:
+		return Credit, true
+	case KindBet:
+		return Debit, true
+	case KindRollback:
+		// A rollback's direction depends on what it reverses, so it has none of
+		// its own. That is also why a rollback cannot be rolled back: there is
+		// nothing to invert without walking the chain, and walking it would
+		// just be reapplying the original operation by a longer route.
+		return "", false
+	default: // KindLoss
+		return "", false
+	}
+}
+
+// CanReverse says whether this kind may undo an operation of the target kind.
+//
+//	REFUND   → BET
+//	ROLLBACK → BET, WIN, REFUND
+//
+// LOSS moved nothing, so there is nothing to undo. OPENING is internal, and
+// reversing it would be deleting a wallet by another name. See
+// docs/adr/0008-reversals.md.
+func (k Kind) CanReverse(target Kind) bool {
+	switch k {
+	case KindRefund:
+		return target == KindBet
+	case KindRollback:
+		return target == KindBet || target == KindWin || target == KindRefund
+	default:
+		return false
+	}
+}
+
+// ReversalDirection is which way a reversal of the target moves money: the
+// opposite of what the target did.
+func ReversalDirection(target Kind) (Direction, error) {
+	direction, moves := target.Direction()
+	if !moves {
+		return "", fail(CodeReferenceNotReversible, "%s moves no money", target)
+	}
+	return direction.Opposite(), nil
+}
+
+// utcOrZero normalises an optional instant without turning the zero value into
+// a real time in 1 AD, which is what a bare .UTC() would do.
+func utcOrZero(at time.Time) time.Time {
+	if at.IsZero() {
+		return time.Time{}
+	}
+	return at.UTC()
 }
