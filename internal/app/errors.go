@@ -39,6 +39,11 @@ var (
 	// decode. Domain rejections are domain.Error and carry their own code.
 	ErrInvalidInput = errors.New("invalid input")
 
+	// ErrNotImplemented means the request is valid and this build cannot serve
+	// it yet. Saying so plainly beats accepting the operation and quietly doing
+	// something else with it.
+	ErrNotImplemented = errors.New("not implemented")
+
 	// ErrNestedUnitOfWork means a unit of work was started inside another one.
 	// Nesting silently as a savepoint is how "transaction" stops meaning
 	// anything: the outer one commits while the inner already undid half.
