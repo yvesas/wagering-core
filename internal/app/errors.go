@@ -34,6 +34,11 @@ var (
 	// is where the retry belongs.
 	ErrSerializationFailure = errors.New("serialization failure")
 
+	// ErrInvalidInput means the request itself is malformed in a way the domain
+	// has no opinion about -- a page size out of range, a cursor that does not
+	// decode. Domain rejections are domain.Error and carry their own code.
+	ErrInvalidInput = errors.New("invalid input")
+
 	// ErrNestedUnitOfWork means a unit of work was started inside another one.
 	// Nesting silently as a savepoint is how "transaction" stops meaning
 	// anything: the outer one commits while the inner already undid half.
