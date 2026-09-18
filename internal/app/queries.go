@@ -61,3 +61,36 @@ func (s *WalletQueries) Ledger(ctx context.Context, walletID string, cursor Ledg
 	}
 	return s.queries.Ledger().ListByWallet(ctx, id, cursor, limit)
 }
+
+// TransactionQueries answers the reads for operations.
+type TransactionQueries struct {
+	queries Queries
+}
+
+func NewTransactionQueries(queries Queries) *TransactionQueries {
+	return &TransactionQueries{queries: queries}
+}
+
+// Get returns an operation by our own identifier.
+func (s *TransactionQueries) Get(ctx context.Context, transactionID string) (domain.WagerTransaction, error) {
+	id, err := domain.ParseTransactionID(transactionID)
+	if err != nil {
+		return domain.WagerTransaction{}, err
+	}
+	return s.queries.Transactions().FindByID(ctx, id)
+}
+
+// GetByBusinessID returns an operation by the pair that identifies it to its
+// provider. This is the lookup a provider uses to follow up on something it
+// submitted, using only identifiers it already has.
+func (s *TransactionQueries) GetByBusinessID(ctx context.Context, providerID, externalID string) (domain.WagerTransaction, error) {
+	provider, err := domain.ParseProviderID(providerID)
+	if err != nil {
+		return domain.WagerTransaction{}, err
+	}
+	external, err := domain.ParseExternalTransactionID(externalID)
+	if err != nil {
+		return domain.WagerTransaction{}, err
+	}
+	return s.queries.Transactions().FindByBusinessID(ctx, provider, external)
+}

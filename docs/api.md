@@ -51,6 +51,8 @@ para o log junto do `correlationId`.
 | Saldo insuficiente | 422 | `INSUFFICIENT_FUNDS` |
 | Erro interno | 500 | `INTERNAL` |
 | Falha transitória; vale repetir | 503 | `TRY_AGAIN` |
+| Operação válida que este build ainda não serve | 501 | `NOT_IMPLEMENTED` |
+| Chave de idempotência usada por outra operação | 409 | `IDEMPOTENCY_KEY_REUSED` |
 
 O mapa completo de código de domínio para status vive em
 `internal/adapter/http/errors.go`, e um teste lê o código-fonte do domínio para
@@ -128,6 +130,82 @@ repetir linha.
 
 Carteira inexistente é **404**, não página vazia: "sem movimentação ainda" e
 "essa carteira não existe" são respostas diferentes.
+
+## `POST /wagering/transactions`
+
+Envia uma operação. **O header `Idempotency-Key` é obrigatório.**
+
+O servidor nunca substitui a chave recebida por uma calculada. Um cliente pode
+montá-la como `{providerId}:{externalTransactionId}`, mas calcular isso quando o
+header falta seria aceitar uma requisição que o cliente nunca tornou idempotente.
+
+```http
+POST /wagering/transactions
+Idempotency-Key: provider-a:transaction-123
+```
+
+```json
+{
+  "providerId": "provider-a",
+  "externalTransactionId": "transaction-123",
+  "playerId": "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1",
+  "walletId": "0192f291-27dd-7d3f-8071-5f8685deef37",
+  "roundId": "round-987",
+  "gameId": "fortune-chimp",
+  "kind": "BET",
+  "money": { "amount": "25.00", "currency": "BRL" }
+}
+```
+
+**200 OK**
+
+```json
+{
+  "transactionId": "0192f298-345e-7e38-af88-e43f851a819d",
+  "status": "PROCESSED",
+  "balance": { "amount": "975.00", "currency": "BRL" },
+  "idempotentReplay": false
+}
+```
+
+### O que está implementado
+
+`BET` debita, `WIN` credita, `LOSS` exige `"0.00"` e não movimenta nada — sem
+lançamento e sem incrementar a versão da carteira.
+
+**`REFUND` e `ROLLBACK` respondem 501.** Eles precisam resolver a referência
+antes de aplicar, e essa parte ainda não existe. Dizer isso é melhor que aceitar
+a operação e fazer outra coisa com ela em silêncio.
+
+### Idempotência
+
+| Situação | Resposta |
+|---|---|
+| Mesma chave, mesmo conteúdo | O resultado guardado, com `idempotentReplay: true` |
+| Mesma chave, conteúdo diferente | 409 `IDEMPOTENCY_KEY_REUSED` |
+| Mesma operação sob outra chave | 409 `CONFLICT` |
+| Regra de negócio recusou | 422 com `failureCode` — e o replay devolve 422 também |
+
+**O replay devolve o saldo observado no processamento original**, não o saldo
+atual da carteira. Se outra operação caiu no meio, os dois diferem, e o chamador
+tem direito à resposta que a requisição dele produziu.
+
+Uma **rejeição é resultado gravado**, não erro: um reenvio lê a rejeição em vez
+de tentar de novo. Um reenvio que de repente respondesse 200 diria ao provedor
+que a aposta passou.
+
+O que entra no hash do payload e o que fica de fora está em
+[`docs/adr/0006-idempotency-hash.md`](adr/0006-idempotency-hash.md).
+
+## `GET /wagering/transactions/{transactionId}`
+
+**200 OK** com a operação, incluindo `status`, `failureCode` quando houver e
+`balanceAfter` quando tiver sido processada.
+
+## `GET /providers/{providerId}/wagering/transactions/{externalTransactionId}`
+
+O mesmo corpo, pelo par que identifica a operação para o provedor — os
+identificadores que ele já tem.
 
 ## `GET /health/live`
 

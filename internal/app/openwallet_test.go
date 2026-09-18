@@ -71,27 +71,48 @@ type memoryStore struct {
 	entries      []domain.LedgerEntry
 
 	failOnInsertWallet error
+	failOnInsertTx     error
 	commits            int
 	rollbacks          int
 }
 
+func (s *memoryStore) clone() *memoryStore {
+	return &memoryStore{
+		wallets:            append([]domain.Wallet(nil), s.wallets...),
+		transactions:       append([]domain.WagerTransaction(nil), s.transactions...),
+		entries:            append([]domain.LedgerEntry(nil), s.entries...),
+		failOnInsertWallet: s.failOnInsertWallet,
+		failOnInsertTx:     s.failOnInsertTx,
+	}
+}
+
 type memoryUnitOfWork struct{ store *memoryStore }
 
-// Do buffers the writes and only publishes them when the callback returns nil,
-// which is the property the real one gets from the database. A fake that wrote
+// Do works on a copy and only publishes it when the callback returns nil, which
+// is the property the real one gets from the database. A fake that wrote
 // straight through would let a test pass while the real rollback was broken.
+//
+// The copy carries what is already committed, so a callback reads its own
+// writes and everyone else's -- the same thing a transaction sees.
 func (u *memoryUnitOfWork) Do(ctx context.Context, fn func(context.Context, Repositories) error) error {
-	staged := &memoryStore{failOnInsertWallet: u.store.failOnInsertWallet}
+	staged := u.store.clone()
 	if err := fn(ctx, &memoryRepositories{store: staged}); err != nil {
 		u.store.rollbacks++
 		return err
 	}
-	u.store.wallets = append(u.store.wallets, staged.wallets...)
-	u.store.transactions = append(u.store.transactions, staged.transactions...)
-	u.store.entries = append(u.store.entries, staged.entries...)
+	u.store.wallets = staged.wallets
+	u.store.transactions = staged.transactions
+	u.store.entries = staged.entries
 	u.store.commits++
 	return nil
 }
+
+// memoryQueries reads what is committed, outside any transaction.
+type memoryQueries struct{ store *memoryStore }
+
+func (q *memoryQueries) Wallets() WalletReader           { return &memoryWallets{store: q.store} }
+func (q *memoryQueries) Ledger() LedgerReader            { return &memoryLedger{store: q.store} }
+func (q *memoryQueries) Transactions() TransactionReader { return &memoryTx{store: q.store} }
 
 type memoryRepositories struct{ store *memoryStore }
 
@@ -109,13 +130,37 @@ func (m *memoryWallets) Insert(_ context.Context, w domain.Wallet) error {
 	return nil
 }
 
-func (m *memoryWallets) UpdateBalance(context.Context, domain.Wallet, int64) error { return nil }
+// UpdateBalance honours the expected version, because a fake that ignored it
+// would make the lost-update guard untestable at this level.
+func (m *memoryWallets) UpdateBalance(_ context.Context, w domain.Wallet, expected int64) error {
+	for i, stored := range m.store.wallets {
+		if stored.ID() != w.ID() {
+			continue
+		}
+		if stored.Version() != expected {
+			return ErrVersionMismatch
+		}
+		m.store.wallets[i] = w
+		return nil
+	}
+	return ErrNotFound
+}
 
-func (m *memoryWallets) FindByID(context.Context, domain.WalletID) (domain.Wallet, error) {
+func (m *memoryWallets) FindByID(_ context.Context, id domain.WalletID) (domain.Wallet, error) {
+	for _, w := range m.store.wallets {
+		if w.ID() == id {
+			return w, nil
+		}
+	}
 	return domain.Wallet{}, ErrNotFound
 }
 
-func (m *memoryWallets) FindByPlayerAndCurrency(context.Context, domain.PlayerID, domain.Currency) (domain.Wallet, error) {
+func (m *memoryWallets) FindByPlayerAndCurrency(_ context.Context, player domain.PlayerID, currency domain.Currency) (domain.Wallet, error) {
+	for _, w := range m.store.wallets {
+		if w.PlayerID() == player && w.Currency() == currency {
+			return w, nil
+		}
+	}
 	return domain.Wallet{}, ErrNotFound
 }
 
@@ -136,18 +181,56 @@ func (m *memoryLedger) SumByWallet(context.Context, domain.WalletID, domain.Curr
 
 type memoryTx struct{ store *memoryStore }
 
+// Insert enforces the same two uniqueness rules the schema does, because those
+// constraints are the actual idempotency guarantee -- a fake without them would
+// let a test pass while the real race was wide open.
 func (m *memoryTx) Insert(_ context.Context, t domain.WagerTransaction) error {
+	if m.store.failOnInsertTx != nil {
+		return m.store.failOnInsertTx
+	}
+	for _, stored := range m.store.transactions {
+		if stored.ProviderID() == t.ProviderID() && stored.ExternalID() == t.ExternalID() &&
+			!t.ExternalID().IsZero() {
+			return NewConflict("wager_transactions_business_identity")
+		}
+		if stored.ProviderID() == t.ProviderID() && stored.IdempotencyKey() == t.IdempotencyKey() &&
+			!t.IdempotencyKey().IsZero() {
+			return NewConflict(constraintIdempotencyKey)
+		}
+	}
 	m.store.transactions = append(m.store.transactions, t)
 	return nil
 }
 
-func (m *memoryTx) Update(context.Context, domain.WagerTransaction) error { return nil }
+func (m *memoryTx) Update(_ context.Context, t domain.WagerTransaction) error {
+	for i, stored := range m.store.transactions {
+		if stored.ID() != t.ID() {
+			continue
+		}
+		if stored.IsTerminal() {
+			return ErrConflict
+		}
+		m.store.transactions[i] = t
+		return nil
+	}
+	return ErrNotFound
+}
 
-func (m *memoryTx) FindByID(context.Context, domain.TransactionID) (domain.WagerTransaction, error) {
+func (m *memoryTx) FindByID(_ context.Context, id domain.TransactionID) (domain.WagerTransaction, error) {
+	for _, t := range m.store.transactions {
+		if t.ID() == id {
+			return t, nil
+		}
+	}
 	return domain.WagerTransaction{}, ErrNotFound
 }
 
-func (m *memoryTx) FindByBusinessID(context.Context, domain.ProviderID, domain.ExternalTransactionID) (domain.WagerTransaction, error) {
+func (m *memoryTx) FindByBusinessID(_ context.Context, provider domain.ProviderID, external domain.ExternalTransactionID) (domain.WagerTransaction, error) {
+	for _, t := range m.store.transactions {
+		if t.ProviderID() == provider && t.ExternalID() == external {
+			return t, nil
+		}
+	}
 	return domain.WagerTransaction{}, ErrNotFound
 }
 

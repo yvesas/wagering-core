@@ -3,8 +3,9 @@
 > Este documento descreve o que **existe**, não o que está planejado. O desenho
 > pretendido vive em `specs/project/PROJECT.md` e no `spec.md` de cada feature.
 >
-> **Estado atual:** domínio, persistência, o primeiro caso de uso e a borda
-> HTTP, compostos por Fx. Não há fila, autenticação nem operações de aposta.
+> **Estado atual:** domínio, persistência, casos de uso de abertura e envio de
+> operação com idempotência persistente, e a borda HTTP composta por Fx. Não há
+> fila, autenticação nem reversões.
 
 ## O que existe
 
@@ -201,10 +202,44 @@ dele — renomear constraint é migration, não mudança de contrato.
 
 Contrato completo em `docs/api.md`.
 
+## Idempotência
+
+**Não existe tabela de chaves.** A linha de `wager_transactions` já carrega a
+chave, o hash e o saldo observado, com unicidade em `(provider, external_id)` e
+em `(provider, idempotency_key)`. Duas linhas sobre o mesmo fato é como elas
+passam a discordar.
+
+**O caminho não é consultar antes de escrever.** Entre a consulta e o insert
+cabem outras cinco cópias da mesma requisição. O caminho é inserir e deixar a
+constraint recusar: quem perdeu a corrida relê a linha vencedora e devolve o
+resultado dela. A consulta que vem antes é otimização; a constraint é a garantia.
+
+**O hash não inclui a chave nem metadado de transporte.** Incluir a chave faria
+todo reenvio bater por construção; incluir `messageId` impediria HTTP e fila de
+chegarem ao mesmo valor. A única normalização é o valor monetário pela forma
+canônica de `Money.String()`, e ela está documentada porque hash com entrada
+reescrita em silêncio é hash que ninguém reproduz. Ver
+`docs/adr/0006-idempotency-hash.md`.
+
+**Rejeição é resultado gravado, não erro.** O desfecho mora em
+`Transaction.Status()`, não no erro devolvido: se a rejeição viajasse como erro,
+o primeiro envio falharia e o replay teria sucesso, porque um replay lê linha
+gravada e não tem o que falhar.
+
 ## O que os testes provam
 
-341 casos no total: unidade no domínio, no caso de uso e nos handlers, mais
+390 casos no total: unidade no domínio, nos casos de uso e nos handlers, mais
 integração contra PostgreSQL de verdade. `-race` limpo.
+
+Três guardas valem menção porque protegem invariante:
+
+- **O hash tem teste de valor fixo.** Mudar campo, ordem ou separador quebra
+  alto. Sem isso, a mudança invalidaria todo registro já gravado e o sintoma
+  seria movimentação duplicada em produção, não teste vermelho.
+- **O teste de reinício derruba o grafo inteiro** — pool, memória, tudo — sobe
+  outro contra o mesmo banco e reenvia. É a única forma honesta de mostrar que a
+  idempotência mora no banco.
+- **Vinte duplicatas concorrentes**, soltas juntas, movem dinheiro uma vez.
 
 O teste da composição sobe o grafo inteiro, atende uma requisição real de ponta
 a ponta e encerra — grafo validado sem start não prova a ordem do encerramento,
@@ -234,6 +269,6 @@ créditos menos débitos.
 
 ## O que ainda não existe
 
-Operações de aposta, idempotência, concorrência, fila, outbox, autenticação,
-métricas e reconciliação. A ordem em que entram está no plano de ação, fora do
+Reversões (`REFUND`, `ROLLBACK`, que hoje respondem 501), retry sob conflito de
+versão, fila, outbox, autenticação, métricas e reconciliação. A ordem em que entram está no plano de ação, fora do
 repositório.
