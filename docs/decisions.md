@@ -12,6 +12,10 @@
 | 2026-09-18 | Requisitos com ID versionados em `specs/project/REQUIREMENTS.md` | Precisam viajar no clone para o `spec.md` de cada feature poder citá-los. Ficariam órfãos fora do repositório. |
 | 2026-09-18 | Plano, ordem das tarefas e andamento fora do repositório | Plano e verdade no mesmo arquivo envelhecem juntos e ninguém confia em nenhum dos dois. O repositório guarda o produto; a pasta de controle, a execução. |
 | 2026-09-18 | Convenções de Go no `CLAUDE.md` do projeto | A rule `code-style.md` do baseline é de TypeScript e não se edita dentro de um projeto — a próxima instalação sobrescreve. O `CLAUDE.md` é o arquivo que o instalador nunca toca. |
+| 2026-09-18 | Movimentação devolve carteira nova, não muta no lugar (F1.7) | Um débito recusado tem de deixar a carteira do chamador intacta. Com receptor por ponteiro isso é promessa que todo retorno antecipado precisa lembrar de cumprir; com receptor por valor é o compilador que garante. O custo é alocação, e ela é irrelevante no tamanho destes agregados. |
+| 2026-09-18 | Um tipo de transação para as duas origens (F1.8) | Dois tipos duplicariam a máquina de estados, que é a parte arriscada, e a cópia divergiria no primeiro conserto aplicado só de um lado. A segurança que tipos separados comprariam fica de pé pelos campos não exportados e por dois structs de parâmetro distintos: uma abertura não tem onde pôr um id de provedor. |
+| 2026-09-18 | Identificadores são strings opacas, não UUID | O domínio não decide como uma identidade é gerada: as internas são UUIDv7 cunhados por um adaptador e as externas são o que o provedor mandou (`transaction-123`). Validar formato aqui rejeitaria entrada legítima. |
+| 2026-09-18 | Escala fixa de duas casas no tipo, não na moeda | Exclui JPY (zero casas) e KWD (três); aceito porque os fluxos são em BRL. O tipo carrega a moeda, então o que muda no dia em que outra escala entrar é o fator, não o desenho. |
 | 2026-09-18 | `.claude/` bifurcado do `yas-claude-base` v0.6.4 | O baseline assume TypeScript, e a suposição matava guardas em silêncio. Detalhe em `.claude/README.md`. |
 | 2026-09-18 | Branch resolvida por `symbolic-ref`, não `rev-parse` | Em repositório sem commits o `rev-parse --abbrev-ref HEAD` devolve `"HEAD"`, e o guard de commit na `main` liberava em silêncio. |
 | 2026-09-18 | Guards de hook falham fechados sem parser JSON | Guarda que não lê o pedido não sabe o que autorizar. A versão anterior liberava tudo, inclusive `cat .env`. |
@@ -19,7 +23,7 @@
 
 ## `docs/architecture.md`
 
-Ainda não existe, de propósito. `docs/` descreve o sistema **como ele é**, e
-hoje não há sistema. O arquivo nasce junto com o primeiro código que o torne
-verdadeiro. O desenho pretendido vive em `specs/project/PROJECT.md` e no
-`design.md` de cada feature, que é onde plano deve morar.
+Nasceu com a feature 0001, quando passou a existir sistema para descrever. Ele
+documenta o que **existe** — hoje, só o pacote de domínio — e não o que está
+planejado. O desenho pretendido continua em `specs/project/PROJECT.md` e no
+`spec.md` de cada feature.

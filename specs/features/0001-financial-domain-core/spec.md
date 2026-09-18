@@ -1,6 +1,6 @@
 # 0001 — Núcleo de domínio financeiro
 
-- **Status:** especificada, não iniciada
+- **Status:** implementada · 231 casos de teste · 96% de cobertura · `-race` limpo
 - **Requisitos cobertos:** `REQ-MON-001..011` · `REQ-WAL-001..008` ·
   `REQ-LED-001..003` · `REQ-LED-006` · `REQ-TRX-001..011` (modelagem) ·
   `REQ-TST-001`
@@ -85,24 +85,24 @@ feature 0002.
 | E2 | Nenhum `panic` representa rejeição de negócio. |
 | E3 | Cada rejeição carrega um código estável, que será o `failureCode` exposto depois. |
 
-## Áreas cinzentas — decidir antes de codificar
+## Áreas cinzentas — resolvidas
 
-**Representação monetária: `int64` em unidades mínimas ou biblioteca decimal?**
-`int64` não traz dependência e é rápido, mas exige tratar overflow à mão e
-amarra a escala. Uma biblioteca decimal resolve escala e overflow, e custa uma
-dependência dentro do domínio — que é justamente onde não queremos dependências.
-Decidir em **F1.1**, com ADR, incluindo o limite numérico documentado.
+**Representação monetária → `int64` de unidades mínimas.** Decidido em F1.1,
+com `docs/adr/0002-money-representation.md`. A opção de biblioteca decimal perdeu
+pela golden rule; `math/big` perdeu pela imutabilidade, porque um ponteiro
+interno faz de "value object" uma convenção em vez de uma garantia do tipo.
 
-**O resultado de débito e crédito é uma nova carteira ou mutação no lugar?**
-Retornar `(novaCarteira, lançamento, erro)` mantém o valor imutável e torna o
-teste trivial, ao custo de mais alocação. Mutar com ponteiro é idiomático em Go
-e mais barato, mas abre espaço para estado meio-alterado quando o erro aparece
-no meio. Decidir em **F1.7**.
+**Débito e crédito → carteira nova, receptor por valor.** Devolvem um
+`Movement` com a carteira e o lançamento juntos, porque são confirmados juntos.
+O que decidiu: um débito recusado tem de deixar a carteira do chamador intacta,
+e por valor é o compilador que garante isso, não a disciplina de cada retorno
+antecipado. Coberto por `TestRejectedDebitLeavesTheWalletUntouched`.
 
-**A transação é um tipo só com campos opcionais, ou tipos separados por origem?**
-Um tipo com campos nulos é simples e espelha a tabela; tipos separados tornam
-impossível construir uma abertura com identificador de provedor. Decidir em
-**F1.8**.
+**Transação → um tipo, dois construtores.** Tipos separados duplicariam a
+máquina de estados, que é a parte arriscada. A segurança que eles comprariam
+ficou de pé assim mesmo: campos não exportados e dois structs de parâmetro
+distintos, então uma abertura não tem onde pôr um id de provedor. Coberto por
+`TestNewOpeningTransaction` e `TestRehydrateTransactionRejectsMixedOrigins`.
 
 ## Como se prova que está pronto
 
@@ -121,9 +121,11 @@ Um teste específico não pode faltar: uma varredura garantindo que nenhum arqui
 do pacote de domínio contém `float32` ou `float64`. É a invariante mais fácil de
 violar por descuido e a mais cara de descobrir tarde.
 
-## Ao fechar
+## Ao fechar — feito
 
-- ADRs de **F1.1** e das demais áreas cinzentas escritos em `docs/adr/`.
-- `docs/glossary.md` revisado se algum nome mudou na implementação.
-- `docs/architecture.md` criado — passa a existir sistema para descrever.
-- `TASKS.md` e `STATE.md`, na pasta de controle, atualizados.
+- [x] ADR de **F1.1** em `docs/adr/0002-money-representation.md`; as outras duas
+      áreas cinzentas ficaram em `docs/decisions.md`, por serem decisões de
+      desenho local e não estruturais.
+- [x] `docs/glossary.md` conferido contra a implementação: os nomes bateram.
+- [x] `docs/architecture.md` criado — passou a existir sistema para descrever.
+- [x] `TASKS.md` e `STATE.md`, na pasta de controle, atualizados.
