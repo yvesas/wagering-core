@@ -1,6 +1,6 @@
 # 0002 — Persistência e schema
 
-- **Status:** em implementação
+- **Status:** implementada · 26 casos de integração contra PostgreSQL real · `-race` limpo
 - **Requisitos cobertos:** `REQ-PER-001..005` · `REQ-WAL-002` · `REQ-WAL-005` ·
   `REQ-WAL-008` (a metade que é do banco) · `REQ-LED-004..005` · `REQ-TRX-009` ·
   `REQ-TST-002..003`
@@ -71,19 +71,22 @@ Constraint de banco não é redundância: é a última linha. O domínio erra.
 | C4 | `UpdateBalance` é condicionado à versão esperada e reporta quando não casa nenhuma linha. |
 | C5 | Violação de unicidade é distinguível de erro genérico. |
 
-## Áreas cinzentas — decidir durante
+## Áreas cinzentas — resolvidas
 
-**Ferramenta de migration.** CLI externa exige instalar binário e complica o
-`make`; biblioteca embarcada com `embed.FS` mantém tudo num comando e custa uma
-dependência no adaptador. Decidir em **F2.2**.
+**Migration → goose como biblioteca, SQL embarcado por `go:embed`.** O binário
+carrega o próprio schema, e o advisory lock do goose torna seguro toda réplica
+chamar no start-up.
 
-**Tipo da coluna de id.** `TEXT` é honesto com identificadores opacos e aceita
-`transaction-123`; `UUID` é mais compacto e validaria formato, mas rejeitaria
-id externo legítimo. Decidir em **F2.3**.
+**Coluna de id → `TEXT`.** `UUID` rejeitaria `transaction-123`, que é entrada
+legítima de provedor.
 
-**Imutabilidade do ledger: trigger, `REVOKE` ou os dois.** `REVOKE` não alcança
-o dono da tabela nem um superusuário; trigger alcança, ao custo de rodar em toda
-escrita. Decidir em **F2.5**.
+**Imutabilidade → trigger e `REVOKE`, e são dois triggers.** `REVOKE` não alcança
+o dono da tabela e migration roda como dono. `TRUNCATE` não dispara trigger de
+linha, então o de statement fecha a porta que sobrava.
+
+**Descoberto no caminho:** com o ledger imutável, teste de integração não limpa
+o que criou — `DELETE` e `TRUNCATE` são recusados. Os testes usam identificadores
+únicos por execução em vez de desfazer.
 
 ## Como se prova que está pronto
 

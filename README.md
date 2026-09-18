@@ -18,8 +18,8 @@ repositório, na pasta de controle ao lado.
 
 | Fase | Entrega | Situação |
 |---|---|---|
-| 1 | Núcleo de domínio: valor monetário, carteira, ledger, transação | a fazer |
-| 2 | Persistência, migrations e constraints | a fazer |
+| 1 | Núcleo de domínio: valor monetário, carteira, ledger, transação | pronta |
+| 2 | Persistência, migrations e constraints | pronta |
 | 3 | Abertura de carteira, HTTP e composição por DI | a fazer |
 | 4 | Idempotência persistente e replay | a fazer |
 | 5 | Concorrência por carteira | a fazer |
@@ -49,7 +49,9 @@ make up               # sobe PostgreSQL e demais dependências locais
 ## Comandos
 
 ```sh
-make check    # fmt + vet + test + race — o gate antes de commitar
+make check            # fmt + vet + domain-check + app-check + test + race
+make up-test          # sobe o PostgreSQL isolado dos testes
+make test-integration # testes contra o banco de verdade
 make test     # go test ./...
 make race     # go test -race ./...
 make vet      # go vet ./...

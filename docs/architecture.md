@@ -3,30 +3,38 @@
 > Este documento descreve o que **existe**, não o que está planejado. O desenho
 > pretendido vive em `specs/project/PROJECT.md` e no `spec.md` de cada feature.
 >
-> **Estado atual:** só o núcleo de domínio existe. Não há banco, HTTP, fila,
-> autenticação nem composição por injeção de dependência.
+> **Estado atual:** domínio e persistência. Não há HTTP, fila, autenticação nem
+> composição por injeção de dependência.
 
 ## O que existe
 
-Um pacote: `internal/domain`. Ele importa apenas a biblioteca padrão —
-`encoding/json`, `math`, `strconv`, `time` e `fmt` — e nada mais. A regra é
-verificada por `make domain-check`, que faz parte de `make check` e do hook do
-`Stop`.
-
 ```
-internal/domain/
-├── doc.go           responsabilidade do pacote e o que ele não pode importar
-├── errors.go        Code, Error e as sentinelas
-├── identifier.go    os identificadores opacos
-├── money.go         Currency e Money
-├── ledger.go        Direction e LedgerEntry
-├── wallet.go        Wallet, Movement e Opening
-└── transaction.go   Kind, Origin, Status e WagerTransaction
+internal/domain/            o núcleo, sem import de infraestrutura
+├── errors.go               Code, Error e as sentinelas
+├── identifier.go           os identificadores opacos
+├── money.go                Currency e Money
+├── ledger.go               Direction e LedgerEntry
+├── wallet.go               Wallet, Movement e Opening
+└── transaction.go          Kind, Origin, Status e WagerTransaction
+
+internal/app/               as portas, declaradas por quem consome
+├── ports.go                leitores, repositórios, Repositories, UnitOfWork
+└── errors.go               as falhas que um adaptador pode reportar
+
+internal/adapter/postgres/  a implementação
+├── uow.go                  UnitOfWork, Repositories, Queries
+├── wallet.go · ledger.go · transaction.go   SQL explícito
+├── errors.go               tradução de SQLSTATE na borda
+├── pool.go · migrate.go    pool e migrations embarcadas
+
+migrations/                 o SQL versionado, embarcado por go:embed
+cmd/migrate/                aplica, reverte e reporta a versão
+internal/platform/          configuração
 ```
 
-`cmd/`, `internal/app`, `internal/adapter`, `internal/platform`, `migrations/` e
-`test/` existem como estrutura, com `doc.go` declarando a responsabilidade de
-cada um, mas sem implementação.
+Duas regras rodam dentro do `make check`: `domain-check` garante que
+`internal/domain` não importa infraestrutura, e `app-check` garante o mesmo para
+`internal/app` — que pode importar o domínio e mais nada.
 
 ## Os tipos e o que cada um garante
 
@@ -114,9 +122,47 @@ que divergem.
 
 Nenhuma rejeição de negócio viaja como `panic`.
 
+## A fronteira transacional
+
+`internal/app` declara `UnitOfWork`; o adaptador a implementa. O caso de uso pede
+atomicidade e recebe, dentro de um callback, os repositórios já ligados àquela
+transação — ver `docs/adr/0003-transactional-boundary.md`.
+
+Erro do callback faz rollback, `nil` faz commit, pânico faz rollback e
+repropaga. Nada dentro do callback chama `Commit` ou `Rollback`, e é por isso que
+nenhum dos dois pode ser esquecido.
+
+O rollback roda num contexto que não pode ser cancelado. No contexto do
+chamador, uma requisição já cancelada faria o rollback falhar e a transação
+ficaria aberta até a conexão ser recolhida — que é como um cliente que desligou
+vira um lock que ninguém explica.
+
+Duas guardas parecem redundantes e não são. `UpdateBalance` condiciona a escrita
+à versão lida, numa instrução só, sem janela entre checar e escrever. `Update` de
+transação recusa mover linha já terminal: o domínio sabe o que o chamador tem em
+memória, e o `WHERE` sabe o que está gravado — e um worker que acordou tarde
+segura um `PENDING` velho.
+
+## O que o banco garante
+
+24 constraints, 5 índices únicos e 2 triggers. O ledger é append-only no banco,
+não só no tipo: `REVOKE` sozinho não serviria, porque não alcança o dono da
+tabela e migration roda como dono. São **dois** triggers porque `TRUNCATE` não
+dispara trigger de linha — sem o de statement, a guarda teria uma porta ao lado.
+
+Consequência prática: teste de integração não limpa o que criou. Não dá `DELETE`
+nem `TRUNCATE` no ledger. Os testes usam identificadores únicos por execução, o
+que dá isolamento sem precisar desfazer nada.
+
 ## O que os testes provam
 
-231 casos, `-race` limpo, 96% de cobertura do pacote.
+231 casos de unidade no domínio (96% de cobertura) e 26 de integração contra
+PostgreSQL de verdade, `-race` limpo nos dois.
+
+Cada constraint tem um teste que **a viola de propósito**, vários mandando SQL
+direto, passando por fora do domínio. Regra que o domínio também impõe ainda
+precisa valer no banco: a razão de existir a segunda cópia é justamente que a
+primeira é código.
 
 Dois merecem menção porque guardam invariantes em vez de comportamento:
 
@@ -136,6 +182,6 @@ créditos menos débitos.
 
 ## O que ainda não existe
 
-Persistência, migrations, constraints, casos de uso, portas, HTTP, idempotência,
-concorrência, fila, outbox, autenticação e observabilidade. A ordem em que
-entram está no plano de ação, fora do repositório.
+Casos de uso, HTTP, idempotência, concorrência, fila, outbox, autenticação e
+observabilidade. A ordem em que entram está no plano de ação, fora do
+repositório.
