@@ -12,6 +12,11 @@
 | 2026-09-18 | Requisitos com ID versionados em `specs/project/REQUIREMENTS.md` | Precisam viajar no clone para o `spec.md` de cada feature poder citá-los. Ficariam órfãos fora do repositório. |
 | 2026-09-18 | Plano, ordem das tarefas e andamento fora do repositório | Plano e verdade no mesmo arquivo envelhecem juntos e ninguém confia em nenhum dos dois. O repositório guarda o produto; a pasta de controle, a execução. |
 | 2026-09-18 | Convenções de Go no `CLAUDE.md` do projeto | A rule `code-style.md` do baseline é de TypeScript e não se edita dentro de um projeto — a próxima instalação sobrescreve. O `CLAUDE.md` é o arquivo que o instalador nunca toca. |
+| 2026-09-18 | Lock pessimista por linha de carteira, não otimista puro (F5.1) | ADR 0007. Medido: sem o `FOR UPDATE`, quarenta apostas distintas numa carteira recusam boa parte com 409. O dinheiro fica certo — a versão pega tudo — e a disponibilidade quebra sob carga. |
+| 2026-09-18 | Versão mantida como segunda garantia | O `FOR UPDATE` protege quem passou por ele; um caso de uso futuro que leia sem travar não é protegido por nada. |
+| 2026-09-18 | Retry no unit of work, com jitter | É o único lugar que vê a transação inteira. Sem jitter, quem colidiu junto dorme junto e colide de novo no mesmo instante. |
+| 2026-09-18 | Uma transação trava uma linha de carteira, sempre | Um só recurso travado não forma ciclo, logo não há deadlock. Constrange o futuro: duas carteiras exigem ordem por identificador. |
+| 2026-09-18 | Cenários de concorrência em três processos, não goroutines | Goroutine compartilha pool e memória; um bug que dependesse de lock local passaria em todas. |
 | 2026-09-18 | Sem tabela de chaves de idempotência (F4.1) | A linha da transação já é o registro. Duas linhas sobre o mesmo fato precisam ser mantidas em sincronia, e é assim que passam a discordar. |
 | 2026-09-18 | Inserir e tratar o conflito, não consultar antes | Entre a consulta e o insert cabem outras cópias da mesma requisição. A constraint é a serialização; a consulta prévia é só otimização. |
 | 2026-09-18 | Codificação canônica escrita à mão, com prefixo de comprimento | `chave=valor` concatenado é ambíguo quando o separador aparece dentro do valor — e `externalId` vem do provedor. O hash precisa ser estável para sempre, então não depende do comportamento de ordenação de mapa do `encoding/json`. |
