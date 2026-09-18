@@ -21,6 +21,20 @@ type AppConfig struct {
 	ReferenceMaxAttempts int
 	ReferenceBaseBackoff time.Duration
 	ReferenceTTL         time.Duration
+
+	// The queue. Endpoint is empty in production, where the SDK finds AWS by
+	// itself, and points at the emulator locally.
+	QueueEndpoint          string
+	QueueRegion            string
+	QueueName              string
+	QueueDLQName           string
+	QueueVisibilityTimeout time.Duration
+	QueueWaitTime          time.Duration
+	QueueMaxReceiveCount   int
+	QueueBatchSize         int
+	QueueConsumers         int
+	AWSAccessKeyID         string
+	AWSSecretAccessKey     string
 }
 
 // AppConfigFromEnv reads the process settings, falling back to values that make
@@ -48,6 +62,29 @@ func AppConfigFromEnv() (AppConfig, error) {
 		return AppConfig{}, err
 	}
 	if cfg.ReferenceTTL, err = durationEnv("REFERENCE_TTL", 2*time.Minute); err != nil {
+		return AppConfig{}, err
+	}
+
+	cfg.QueueEndpoint = os.Getenv("QUEUE_ENDPOINT")
+	cfg.QueueRegion = envOr("QUEUE_REGION", "us-east-1")
+	cfg.QueueName = envOr("QUEUE_NAME", "wager-transactions.fifo")
+	cfg.QueueDLQName = envOr("QUEUE_DLQ_NAME", "wager-transactions-dlq.fifo")
+	cfg.AWSAccessKeyID = os.Getenv("AWS_ACCESS_KEY_ID")
+	cfg.AWSSecretAccessKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
+
+	if cfg.QueueVisibilityTimeout, err = durationEnv("QUEUE_VISIBILITY_TIMEOUT", 30*time.Second); err != nil {
+		return AppConfig{}, err
+	}
+	if cfg.QueueWaitTime, err = durationEnv("QUEUE_WAIT_TIME", 10*time.Second); err != nil {
+		return AppConfig{}, err
+	}
+	if cfg.QueueMaxReceiveCount, err = intEnv("QUEUE_MAX_RECEIVE_COUNT", 5); err != nil {
+		return AppConfig{}, err
+	}
+	if cfg.QueueBatchSize, err = intEnv("QUEUE_BATCH_SIZE", 10); err != nil {
+		return AppConfig{}, err
+	}
+	if cfg.QueueConsumers, err = intEnv("QUEUE_CONSUMERS", 2); err != nil {
 		return AppConfig{}, err
 	}
 	return cfg, nil

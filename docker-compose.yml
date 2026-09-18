@@ -1,5 +1,5 @@
-# Local environment. For this round (phases 1-5) only PostgreSQL is needed.
-# The queue emulator and the identity provider arrive in phases 7 and 9.
+# Local environment: PostgreSQL and an SQS emulator. The identity provider
+# arrives in phase 9.
 
 services:
   postgres:
@@ -40,6 +40,49 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    profiles: ["test"]
+
+  # The SQS emulator.
+  #
+  # The tag is pinned, and not out of pedantry: localstack/localstack:latest
+  # became the licensed image, and a build that used it started failing with
+  # "License activation failed" on a day nothing in this repository changed.
+  # 3.8 is the last community line that runs unauthenticated.
+  localstack:
+    image: localstack/localstack:3.8
+    container_name: wagering-localstack
+    environment:
+      SERVICES: sqs
+      DEBUG: 0
+      # The emulator ignores credentials but the SDK refuses to start without
+      # them, so these exist to be present rather than to be secret.
+      AWS_DEFAULT_REGION: ${QUEUE_REGION:-us-east-1}
+    ports:
+      - "${QUEUE_PORT:-4566}:4566"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -q '\"sqs\": \"available\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # A second emulator for the integration tests, so a test run cannot drain a
+  # queue somebody is using by hand.
+  localstack-test:
+    image: localstack/localstack:3.8
+    container_name: wagering-localstack-test
+    environment:
+      SERVICES: sqs
+      DEBUG: 0
+      AWS_DEFAULT_REGION: us-east-1
+    ports:
+      - "4567:4566"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -q '\"sqs\": \"available\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
     profiles: ["test"]
 
 volumes:

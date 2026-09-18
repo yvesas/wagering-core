@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	nethttp "net/http"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" driver for migrations
@@ -14,6 +15,7 @@ import (
 
 	httpadapter "github.com/yvesas/wagering-core/internal/adapter/http"
 	"github.com/yvesas/wagering-core/internal/adapter/postgres"
+	sqsadapter "github.com/yvesas/wagering-core/internal/adapter/sqs"
 	"github.com/yvesas/wagering-core/internal/adapter/system"
 	"github.com/yvesas/wagering-core/internal/app"
 )
@@ -76,8 +78,14 @@ var HTTPModule = fx.Module("http",
 	fx.Invoke(runServer),
 )
 
+// QueueModule provisions the queues and builds the consumers.
+var QueueModule = fx.Module("queue", fx.Provide(newQueueClient))
+
 // WorkersModule runs the background work.
-var WorkersModule = fx.Module("workers", fx.Invoke(runReferenceWorker))
+var WorkersModule = fx.Module("workers",
+	fx.Invoke(runReferenceWorker),
+	fx.Invoke(runConsumers),
+)
 
 // Module is the whole application.
 var Module = fx.Options(
@@ -85,9 +93,94 @@ var Module = fx.Options(
 	DatabaseModule,
 	AdaptersModule,
 	UseCasesModule,
+	QueueModule,
 	HTTPModule,
 	WorkersModule,
 )
+
+// newQueueClient reaches the broker and provisions the queues.
+//
+// It happens at start-up so a broker that is unreachable fails the boot rather
+// than the first message, and it is idempotent so every replica can do it.
+func newQueueClient(appCfg AppConfig, logger *slog.Logger) (*sqsadapter.Client, error) {
+	client, err := sqsadapter.New(context.Background(), sqsadapter.Config{
+		Endpoint:          appCfg.QueueEndpoint,
+		Region:            appCfg.QueueRegion,
+		QueueName:         appCfg.QueueName,
+		DLQName:           appCfg.QueueDLQName,
+		AccessKeyID:       appCfg.AWSAccessKeyID,
+		SecretKey:         appCfg.AWSSecretAccessKey,
+		VisibilityTimeout: appCfg.QueueVisibilityTimeout,
+		WaitTime:          appCfg.QueueWaitTime,
+		MaxReceiveCount:   appCfg.QueueMaxReceiveCount,
+	})
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("queues ready",
+		slog.String("queue", appCfg.QueueName),
+		slog.String("deadLetter", appCfg.QueueDLQName))
+	return client, nil
+}
+
+// runConsumers starts the queue consumers and drains them on stop.
+//
+// Stopping cancels the context, which makes the in-flight Receive return at
+// once; whatever a consumer already holds is finished by the RunOnce it is in.
+// Anything that does not fit in the deadline has its visibility released, so
+// another instance picks it up instead of waiting out the timeout.
+func runConsumers(
+	lc fx.Lifecycle,
+	client *sqsadapter.Client,
+	uow app.UnitOfWork,
+	submit *app.SubmitTransaction,
+	clock app.Clock,
+	cfg AppConfig,
+	logger *slog.Logger,
+) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+
+	lc.Append(fx.Hook{
+		OnStart: func(context.Context) error {
+			for i := 0; i < cfg.QueueConsumers; i++ {
+				consumer := app.NewConsumer(client, uow, submit, clock, app.ConsumerConfig{
+					// One name for all the loops in this process: they are
+					// interchangeable workers on one queue, not different
+					// consumers of it. Naming them apart would let the same
+					// message be handled once per loop.
+					Name:      cfg.QueueName,
+					BatchSize: cfg.QueueBatchSize,
+				}, logger)
+
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					consumer.Run(ctx)
+				}()
+			}
+			logger.Info("queue consumers started", slog.Int("count", cfg.QueueConsumers))
+			return nil
+		},
+		OnStop: func(stopCtx context.Context) error {
+			cancel()
+
+			done := make(chan struct{})
+			go func() { wg.Wait(); close(done) }()
+
+			select {
+			case <-done:
+				logger.Info("queue consumers stopped")
+			case <-stopCtx.Done():
+				// Mid-message when the deadline passed. Saying so matters: the
+				// work is either committed or rolled back, and the message is
+				// either deleted or coming back.
+				logger.Warn("queue consumers did not stop in time")
+			}
+			return nil
+		},
+	})
+}
 
 // referencePolicy reads the wait settings for a reversal whose target has not
 // arrived.
