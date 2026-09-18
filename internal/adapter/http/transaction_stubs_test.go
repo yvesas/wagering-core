@@ -2,10 +2,22 @@ package http
 
 import (
 	"context"
+	"io"
+	"log/slog"
+	"os"
+	"testing"
 
 	"github.com/yvesas/wagering-core/internal/app"
 	"github.com/yvesas/wagering-core/internal/domain"
 )
+
+// TestMain silences the structured logger. These tests exercise the middleware
+// on purpose, and its output would otherwise bury the one line that matters
+// when something fails.
+func TestMain(m *testing.M) {
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	os.Exit(m.Run())
+}
 
 type stubSubmitter struct {
 	result app.SubmitResult

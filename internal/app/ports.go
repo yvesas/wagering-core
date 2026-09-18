@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"time"
 
 	"github.com/yvesas/wagering-core/internal/domain"
 )
@@ -93,6 +94,11 @@ type TransactionReader interface {
 	// provider. It is what a reversal uses to find what it undoes, and what a
 	// replay uses to find its stored result.
 	FindByBusinessID(ctx context.Context, provider domain.ProviderID, external domain.ExternalTransactionID) (domain.WagerTransaction, error)
+
+	// FindProcessedReversalOf returns the successful reversal of an operation,
+	// or ErrNotFound. At most one can exist -- the schema enforces it -- so the
+	// answer is singular by construction.
+	FindProcessedReversalOf(ctx context.Context, reference domain.TransactionID) (domain.WagerTransaction, error)
 }
 
 // TransactionRepository reads and writes operations.
@@ -104,6 +110,12 @@ type TransactionRepository interface {
 	// Update writes a transition. It refuses to move a row that is already
 	// terminal, so a late worker cannot overwrite a stored result.
 	Update(ctx context.Context, transaction domain.WagerTransaction) error
+
+	// ClaimDueReferences reserves pending reversals whose next attempt has come
+	// round, holding them for the rest of the transaction. Rows another worker
+	// already holds are skipped rather than waited on, which is what lets
+	// several workers share the queue.
+	ClaimDueReferences(ctx context.Context, now time.Time, limit int) ([]domain.WagerTransaction, error)
 }
 
 // Repositories is the bundle bound to one transaction. It is handed to the

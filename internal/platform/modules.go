@@ -54,8 +54,10 @@ var AdaptersModule = fx.Module("adapters",
 // these are the same constructors a test calls directly.
 var UseCasesModule = fx.Module("usecases",
 	fx.Provide(
+		referencePolicy,
 		app.NewOpenWallet,
 		app.NewSubmitTransaction,
+		newReferenceWorker,
 		app.NewWalletQueries,
 		app.NewTransactionQueries,
 	),
@@ -74,6 +76,9 @@ var HTTPModule = fx.Module("http",
 	fx.Invoke(runServer),
 )
 
+// WorkersModule runs the background work.
+var WorkersModule = fx.Module("workers", fx.Invoke(runReferenceWorker))
+
 // Module is the whole application.
 var Module = fx.Options(
 	ConfigModule,
@@ -81,7 +86,57 @@ var Module = fx.Options(
 	AdaptersModule,
 	UseCasesModule,
 	HTTPModule,
+	WorkersModule,
 )
+
+// referencePolicy reads the wait settings for a reversal whose target has not
+// arrived.
+func referencePolicy(cfg AppConfig) app.ReferencePolicy {
+	return app.ReferencePolicy{
+		MaxAttempts: cfg.ReferenceMaxAttempts,
+		BaseBackoff: cfg.ReferenceBaseBackoff,
+		TTL:         cfg.ReferenceTTL,
+	}
+}
+
+func newReferenceWorker(uow app.UnitOfWork, ids app.IDGenerator, clock app.Clock, policy app.ReferencePolicy, logger *slog.Logger) *app.ReferenceWorker {
+	return app.NewReferenceWorker(uow, ids, clock, policy, logger)
+}
+
+// runReferenceWorker starts the worker and stops it before the pool closes.
+//
+// It registers after the server, so its OnStop runs first: the worker stops
+// taking new pending items while requests are still draining, and both are done
+// before the pool goes away.
+func runReferenceWorker(lc fx.Lifecycle, worker *app.ReferenceWorker, logger *slog.Logger) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	lc.Append(fx.Hook{
+		OnStart: func(context.Context) error {
+			go func() {
+				defer close(done)
+				worker.Run(ctx)
+			}()
+			logger.Info("pending reference worker started")
+			return nil
+		},
+		OnStop: func(stopCtx context.Context) error {
+			cancel()
+			select {
+			case <-done:
+				logger.Info("pending reference worker stopped")
+				return nil
+			case <-stopCtx.Done():
+				// It is mid-transaction and the deadline passed. Saying so
+				// matters: the work will be picked up again by whoever is next,
+				// because the pending state is in the database.
+				logger.Warn("pending reference worker did not stop in time")
+				return nil
+			}
+		},
+	})
+}
 
 // newPool opens the pool, applies migrations and closes the pool on stop.
 //

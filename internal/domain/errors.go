@@ -28,6 +28,18 @@ const (
 	CodeInvalidAmountForKind Code = "INVALID_AMOUNT_FOR_KIND"
 	CodeMissingReference     Code = "MISSING_REFERENCE"
 	CodeUnexpectedReference  Code = "UNEXPECTED_REFERENCE"
+
+	// Reversal rejections. REVERSAL_EXCEEDS_BALANCE is deliberately not
+	// INSUFFICIENT_FUNDS: a bet without balance is a player trying to spend
+	// what they do not have, which is routine, while a reversal that does not
+	// fit is money already handed over that cannot be taken back. Sharing a
+	// code would bury the second in the volume of the first.
+	CodeReferenceNotFound       Code = "REFERENCE_NOT_FOUND"
+	CodeReferenceMismatch       Code = "REFERENCE_MISMATCH"
+	CodeReferenceAmountMismatch Code = "REFERENCE_AMOUNT_MISMATCH"
+	CodeReferenceNotReversible  Code = "REFERENCE_NOT_REVERSIBLE"
+	CodeAlreadyReversed         Code = "ALREADY_REVERSED"
+	CodeReversalExceedsBalance  Code = "REVERSAL_EXCEEDS_BALANCE"
 )
 
 // Error is a domain rejection: a business rule said no. It is never used for
@@ -85,6 +97,13 @@ var (
 	ErrInvalidAmountForKind = &Error{Code: CodeInvalidAmountForKind}
 	ErrMissingReference     = &Error{Code: CodeMissingReference}
 	ErrUnexpectedReference  = &Error{Code: CodeUnexpectedReference}
+
+	ErrReferenceNotFound       = &Error{Code: CodeReferenceNotFound}
+	ErrReferenceMismatch       = &Error{Code: CodeReferenceMismatch}
+	ErrReferenceAmountMismatch = &Error{Code: CodeReferenceAmountMismatch}
+	ErrReferenceNotReversible  = &Error{Code: CodeReferenceNotReversible}
+	ErrAlreadyReversed         = &Error{Code: CodeAlreadyReversed}
+	ErrReversalExceedsBalance  = &Error{Code: CodeReversalExceedsBalance}
 )
 
 // fail builds a detailed rejection for a code. The detail explains the instance;

@@ -9,11 +9,22 @@ import (
 	"github.com/yvesas/wagering-core/internal/domain"
 )
 
+// testReferencePolicy waits briefly, so a test that exercises the deadline does
+// not spend two minutes doing it.
+var testReferencePolicy = ReferencePolicy{
+	MaxAttempts: 3,
+	BaseBackoff: time.Millisecond,
+	MaxBackoff:  2 * time.Millisecond,
+	TTL:         50 * time.Millisecond,
+	BatchSize:   10,
+	Interval:    time.Millisecond,
+}
+
 type submitFixture struct {
 	submit *SubmitTransaction
 	store  *memoryStore
 	wallet domain.Wallet
-	clock  fakeClock
+	clock  *movableClock
 }
 
 // newSubmitFixture opens a wallet through the real use case, so what the submit
@@ -22,7 +33,7 @@ func newSubmitFixture(t *testing.T, balance string) submitFixture {
 	t.Helper()
 	store := &memoryStore{}
 	ids := &fakeIDs{}
-	clock := fakeClock{at: time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)}
+	clock := newMovableClock(time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC))
 	uow := &memoryUnitOfWork{store: store}
 	queries := &memoryQueries{store: store}
 
@@ -36,7 +47,7 @@ func newSubmitFixture(t *testing.T, balance string) submitFixture {
 	}
 
 	return submitFixture{
-		submit: NewSubmitTransaction(uow, queries, ids, clock),
+		submit: NewSubmitTransaction(uow, queries, ids, clock, testReferencePolicy),
 		store:  store,
 		wallet: wallet,
 		clock:  clock,
@@ -325,6 +336,7 @@ func TestIdempotencyDoesNotDependOnProcessMemory(t *testing.T) {
 		&memoryQueries{store: f.store},
 		&fakeIDs{},
 		f.clock,
+		testReferencePolicy,
 	)
 
 	replay, err := restarted.Execute(context.Background(), cmd)
@@ -336,21 +348,6 @@ func TestIdempotencyDoesNotDependOnProcessMemory(t *testing.T) {
 	}
 	if f.storedWallet(t).Balance().String() != "75.00" {
 		t.Error("the restarted process applied the operation again")
-	}
-}
-
-func TestReversalsAreNotSupportedYet(t *testing.T) {
-	t.Parallel()
-	f := newSubmitFixture(t, "100.00")
-
-	for _, kind := range []string{"REFUND", "ROLLBACK"} {
-		cmd := f.command(kind, "25.00", "tx-"+kind)
-		cmd.ReferenceExternalID = "tx-original"
-
-		_, err := f.submit.Execute(context.Background(), cmd)
-		if !errors.Is(err, ErrNotImplemented) {
-			t.Errorf("%s: error = %v, want ErrNotImplemented", kind, err)
-		}
 	}
 }
 

@@ -16,6 +16,11 @@ type AppConfig struct {
 	LogLevel        slog.Level
 
 	DBMaxConns int32
+
+	// How long a reversal waits for the operation it undoes.
+	ReferenceMaxAttempts int
+	ReferenceBaseBackoff time.Duration
+	ReferenceTTL         time.Duration
 }
 
 // AppConfigFromEnv reads the process settings, falling back to values that make
@@ -34,6 +39,15 @@ func AppConfigFromEnv() (AppConfig, error) {
 		return AppConfig{}, err
 	}
 	if cfg.DBMaxConns, err = int32Env("DB_MAX_CONNS", 10); err != nil {
+		return AppConfig{}, err
+	}
+	if cfg.ReferenceMaxAttempts, err = intEnv("REFERENCE_MAX_ATTEMPTS", 8); err != nil {
+		return AppConfig{}, err
+	}
+	if cfg.ReferenceBaseBackoff, err = durationEnv("REFERENCE_BASE_BACKOFF", time.Second); err != nil {
+		return AppConfig{}, err
+	}
+	if cfg.ReferenceTTL, err = durationEnv("REFERENCE_TTL", 2*time.Minute); err != nil {
 		return AppConfig{}, err
 	}
 	return cfg, nil
@@ -67,6 +81,18 @@ func int32Env(key string, fallback int32) (int32, error) {
 		return 0, fmt.Errorf("%s=%q must be a positive integer", key, raw)
 	}
 	return int32(value), nil
+}
+
+func intEnv(key string, fallback int) (int, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s=%q must be a positive integer", key, raw)
+	}
+	return value, nil
 }
 
 func levelEnv(key string, fallback slog.Level) (slog.Level, error) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,30 @@ import (
 type fakeClock struct{ at time.Time }
 
 func (c fakeClock) Now() time.Time { return c.at }
+
+// movableClock is a clock a test can push forward.
+//
+// A frozen clock cannot exercise anything that waits: a schedule set in the
+// future is never due, and a deadline is never passed. Sleeping instead would
+// make the tests slow and, worse, timing-dependent.
+type movableClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func newMovableClock(at time.Time) *movableClock { return &movableClock{at: at} }
+
+func (c *movableClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *movableClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.at = c.at.Add(d)
+}
 
 // fakeIDs hands out predictable identifiers and can be told to fail, because
 // "the entropy source blew up halfway through" is a path with real
@@ -230,6 +255,32 @@ func (m *memoryTx) FindByID(_ context.Context, id domain.TransactionID) (domain.
 		}
 	}
 	return domain.WagerTransaction{}, ErrNotFound
+}
+
+func (m *memoryTx) FindProcessedReversalOf(_ context.Context, reference domain.TransactionID) (domain.WagerTransaction, error) {
+	for _, t := range m.store.transactions {
+		if t.ResolvedReferenceID() == reference && t.Status() == domain.StatusProcessed {
+			return t, nil
+		}
+	}
+	return domain.WagerTransaction{}, ErrNotFound
+}
+
+func (m *memoryTx) ClaimDueReferences(_ context.Context, now time.Time, limit int) ([]domain.WagerTransaction, error) {
+	var due []domain.WagerTransaction
+	for _, t := range m.store.transactions {
+		if t.Status() != domain.StatusPendingReference {
+			continue
+		}
+		if t.ReferenceNextAttemptAt().After(now) {
+			continue
+		}
+		due = append(due, t)
+		if len(due) == limit {
+			break
+		}
+	}
+	return due, nil
 }
 
 func (m *memoryTx) FindByBusinessID(_ context.Context, provider domain.ProviderID, external domain.ExternalTransactionID) (domain.WagerTransaction, error) {

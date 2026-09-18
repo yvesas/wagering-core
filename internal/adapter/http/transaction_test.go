@@ -50,6 +50,18 @@ func sampleTransaction(t *testing.T, status domain.Status, failureCode domain.Co
 	p.Origin = domain.OriginExternal
 	p.Kind = domain.KindBet
 	p.Status = status
+	if status == domain.StatusPendingReference {
+		// Only a reversal waits, and the schema demands it carry a schedule.
+		p.Kind = domain.KindRefund
+		ref, err := domain.ParseExternalTransactionID("transaction-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.ReferenceExternalID = ref
+		p.ReferenceAttempts = 1
+		p.ReferenceNextAttemptAt = at.Add(time.Second)
+		p.ReferenceDeadlineAt = at.Add(time.Minute)
+	}
 	p.Money = money
 	p.FailureCode = failureCode
 	p.CreatedAt, p.UpdatedAt = at, at
@@ -203,7 +215,10 @@ func TestSubmitConflictAnswers409(t *testing.T) {
 	}
 }
 
-func TestAnUnsupportedKindAnswers501(t *testing.T) {
+// Reversals are implemented now. The mapping stays, and this asserts it still
+// works, because "valid request this build cannot serve" is a thing that will
+// happen again -- 400 would blame the client for something it got right.
+func TestAnUnsupportedRequestAnswers501(t *testing.T) {
 	t.Parallel()
 	submitter := &stubSubmitter{err: app.ErrNotImplemented}
 
@@ -262,5 +277,20 @@ func TestAnUnprocessedTransactionHasNoBalance(t *testing.T) {
 	}
 	if body.FailureCode != string(domain.CodeInsufficientFunds) {
 		t.Errorf("failure code = %q", body.FailureCode)
+	}
+}
+
+func TestAWaitingReversalAnswers202(t *testing.T) {
+	t.Parallel()
+	transaction := sampleTransaction(t, domain.StatusPendingReference, "")
+	submitter := &stubSubmitter{result: app.SubmitResult{Transaction: transaction}}
+
+	rec := submitRequestFor(t, submitter, "provider-a:transaction-123", validSubmitBody)
+	// Nothing moved yet, so not 200; it still might, so not an error.
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202: %s", rec.Code, rec.Body)
+	}
+	if got := decodeBody[submitResponse](t, rec).Status; got != "PENDING_REFERENCE" {
+		t.Errorf("status = %q", got)
 	}
 }

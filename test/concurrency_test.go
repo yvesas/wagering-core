@@ -59,7 +59,11 @@ func freePort(t *testing.T) string {
 }
 
 // startCluster builds the server once and runs it three times.
-func startCluster(t *testing.T) cluster {
+func startCluster(t *testing.T) cluster { return startClusterWith(t, nil) }
+
+// startClusterWith is startCluster with settings overridden, so a test can make
+// a timeout observable instead of waiting out the production one.
+func startClusterWith(t *testing.T, overrides map[string]string) cluster {
 	t.Helper()
 
 	binary := filepath.Join(t.TempDir(), "api")
@@ -80,6 +84,10 @@ func startCluster(t *testing.T) cluster {
 		"DB_PASSWORD="+envOr("TEST_DB_PASSWORD", "local-dev-only"),
 		"DB_SSLMODE=disable",
 	)
+
+	for key, value := range overrides {
+		env = append(env, key+"="+value)
+	}
 
 	var c cluster
 	for i := 0; i < instances; i++ {
@@ -587,4 +595,234 @@ func TestBalanceNeverGoesNegativeUnderContention(t *testing.T) {
 		t.Fatalf("the balance went negative: %s", wallet.Balance.Amount)
 	}
 	assertLedgerMatchesBalance(t, c.next(2), walletID)
+}
+
+// reversal builds a REFUND or ROLLBACK naming what it undoes.
+func reversal(kind, playerID, walletID, externalID, amount, reference string) string {
+	return fmt.Sprintf(`{
+	  "providerId":"provider-a",
+	  "externalTransactionId":%q,
+	  "playerId":%q,
+	  "walletId":%q,
+	  "roundId":"round-1",
+	  "gameId":"fortune-chimp",
+	  "kind":%q,
+	  "money":{"amount":%q,"currency":"BRL"},
+	  "referenceExternalTransactionId":%q
+	}`, externalID, playerID, walletID, kind, amount, reference)
+}
+
+type transactionState struct {
+	TransactionID string `json:"transactionId"`
+	Status        string `json:"status"`
+	FailureCode   string `json:"failureCode"`
+}
+
+func readTransaction(t *testing.T, base, externalID string) transactionState {
+	t.Helper()
+	body, status := get(t, base+"/providers/provider-a/wagering/transactions/"+externalID)
+	if status != http.StatusOK {
+		t.Fatalf("reading %s: %d %s", externalID, status, body)
+	}
+	var out transactionState
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("decoding %s: %v", body, err)
+	}
+	return out
+}
+
+// waitForStatus polls until the transaction reaches one of the wanted states.
+// The worker runs on its own schedule, so the test asks rather than assumes.
+func waitForStatus(t *testing.T, base, externalID string, wanted ...string) transactionState {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	var last transactionState
+	for time.Now().Before(deadline) {
+		last = readTransaction(t, base, externalID)
+		for _, want := range wanted {
+			if last.Status == want {
+				return last
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("%s is %q after 30s, wanted one of %v", externalID, last.Status, wanted)
+	return last
+}
+
+// TestAReversalThatArrivesBeforeItsReferenceIsResolvedLater is the out-of-order
+// case, end to end.
+//
+// The refund overtakes the bet it undoes, which at-least-once delivery makes
+// ordinary rather than exceptional. It is recorded as waiting, the bet lands,
+// and the worker -- possibly in a different process from the one that took the
+// request -- finishes it.
+func TestAReversalThatArrivesBeforeItsReferenceIsResolvedLater(t *testing.T) {
+	c := startCluster(t)
+	suffix := time.Now().Format("150405.000000000")
+	player := "player-outoforder-" + suffix
+
+	walletID := openWallet(t, c.next(0), player, "100.00")
+	betID := "bet-" + suffix
+	refundID := "refund-" + suffix
+
+	// The refund arrives first.
+	body, status := submit(t, c.next(0), "provider-a:"+refundID,
+		reversal("REFUND", player, walletID, refundID, "25.00", betID))
+	if status != http.StatusAccepted {
+		t.Fatalf("the early refund answered %d, want 202: %s", status, body)
+	}
+	if !strings.Contains(body, "PENDING_REFERENCE") {
+		t.Fatalf("the early refund was not parked: %s", body)
+	}
+	if got := readWallet(t, c.next(1), walletID).Balance.Amount; got != "100.00" {
+		t.Fatalf("a waiting reversal moved money: balance is %s", got)
+	}
+
+	// Then the bet it undoes, through a different instance.
+	if body, status := submit(t, c.next(1), "provider-a:"+betID,
+		bet(player, walletID, betID, "25.00")); status != http.StatusOK {
+		t.Fatalf("the bet answered %d: %s", status, body)
+	}
+
+	// The worker takes it from here, on its own schedule.
+	resolved := waitForStatus(t, c.next(2), refundID, "PROCESSED")
+	if resolved.FailureCode != "" {
+		t.Errorf("a processed refund carries a failure code: %q", resolved.FailureCode)
+	}
+
+	// Debited and put back.
+	if got := readWallet(t, c.next(0), walletID).Balance.Amount; got != "100.00" {
+		t.Fatalf("balance = %s, want 100.00", got)
+	}
+	assertLedgerMatchesBalance(t, c.next(1), walletID)
+}
+
+// TestAReversalWhoseReferenceNeverArrivesExpires covers the other end of the
+// wait: the bet never lands, and the refund cannot wait forever.
+func TestAReversalWhoseReferenceNeverArrivesExpires(t *testing.T) {
+	c := startClusterWith(t, map[string]string{
+		// A short TTL, so the test exercises the deadline instead of waiting
+		// out the production one.
+		"REFERENCE_TTL":          "2s",
+		"REFERENCE_BASE_BACKOFF": "100ms",
+		"REFERENCE_MAX_ATTEMPTS": "20",
+	})
+	suffix := time.Now().Format("150405.000000000")
+	player := "player-expired-" + suffix
+
+	walletID := openWallet(t, c.next(0), player, "100.00")
+	refundID := "refund-" + suffix
+
+	if body, status := submit(t, c.next(0), "provider-a:"+refundID,
+		reversal("REFUND", player, walletID, refundID, "25.00", "a-bet-that-never-arrives")); status != http.StatusAccepted {
+		t.Fatalf("status = %d: %s", status, body)
+	}
+
+	expired := waitForStatus(t, c.next(1), refundID, "REJECTED")
+	if expired.FailureCode != "REFERENCE_NOT_FOUND" {
+		t.Fatalf("failure code = %q, want REFERENCE_NOT_FOUND", expired.FailureCode)
+	}
+	if got := readWallet(t, c.next(2), walletID).Balance.Amount; got != "100.00" {
+		t.Fatalf("an expired reversal moved money: balance is %s", got)
+	}
+}
+
+// TestTheSameDebitIsNotReturnedTwiceAcrossProcesses is the rule that matters
+// most, proven where it has to hold: in the database, with the two reversals
+// arriving at different instances at the same instant.
+func TestTheSameDebitIsNotReturnedTwiceAcrossProcesses(t *testing.T) {
+	c := startCluster(t)
+	suffix := time.Now().Format("150405.000000000")
+	player := "player-doublereturn-" + suffix
+
+	walletID := openWallet(t, c.next(0), player, "100.00")
+	betID := "bet-" + suffix
+
+	if body, status := submit(t, c.next(0), "provider-a:"+betID,
+		bet(player, walletID, betID, "25.00")); status != http.StatusOK {
+		t.Fatalf("the bet answered %d: %s", status, body)
+	}
+
+	// A refund and a rollback of the same bet, released together at different
+	// instances. They are different types, which is exactly why "no two of the
+	// same type" would not be enough: both would hand back the same 25.00.
+	type outcome struct {
+		status int
+		body   string
+	}
+	outcomes := make([]outcome, 2)
+	kinds := []string{"REFUND", "ROLLBACK"}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for i, kind := range kinds {
+		wg.Add(1)
+		go func(i int, kind string) {
+			defer wg.Done()
+			external := fmt.Sprintf("%s-%s", strings.ToLower(kind), suffix)
+			<-start
+			body, status := submit(t, c.next(i), "provider-a:"+external,
+				reversal(kind, player, walletID, external, "25.00", betID))
+			outcomes[i] = outcome{status: status, body: body}
+		}(i, kind)
+	}
+	close(start)
+	wg.Wait()
+
+	applied, refused := 0, 0
+	for i, o := range outcomes {
+		switch {
+		case o.status == http.StatusOK && strings.Contains(o.body, "PROCESSED"):
+			applied++
+		case o.status == http.StatusUnprocessableEntity && strings.Contains(o.body, "ALREADY_REVERSED"):
+			refused++
+		default:
+			t.Errorf("%s answered %d: %s", kinds[i], o.status, o.body)
+		}
+	}
+	if applied != 1 || refused != 1 {
+		t.Fatalf("%d applied and %d refused, want one of each", applied, refused)
+	}
+
+	// The 25.00 came back once.
+	if got := readWallet(t, c.next(2), walletID).Balance.Amount; got != "100.00" {
+		t.Fatalf("balance = %s, want 100.00", got)
+	}
+	assertLedgerMatchesBalance(t, c.next(0), walletID)
+}
+
+// TestReversingARefundIsAllowed guards the other side of the rule: the chain
+// BET -> REFUND -> ROLLBACK(of the refund) is legitimate, and a rule that
+// blocked it would be too blunt.
+func TestReversingARefundIsAllowed(t *testing.T) {
+	c := startCluster(t)
+	suffix := time.Now().Format("150405.000000000")
+	player := "player-chain-" + suffix
+
+	walletID := openWallet(t, c.next(0), player, "100.00")
+	betID, refundID, rollbackID := "bet-"+suffix, "refund-"+suffix, "rollback-"+suffix
+
+	if _, status := submit(t, c.next(0), "provider-a:"+betID,
+		bet(player, walletID, betID, "25.00")); status != http.StatusOK {
+		t.Fatalf("the bet answered %d", status)
+	}
+	if _, status := submit(t, c.next(1), "provider-a:"+refundID,
+		reversal("REFUND", player, walletID, refundID, "25.00", betID)); status != http.StatusOK {
+		t.Fatalf("the refund answered %d", status)
+	}
+
+	// The rollback names the refund, not the bet: it undoes the return, not the
+	// stake, and each operation has still been reversed exactly once.
+	body, status := submit(t, c.next(2), "provider-a:"+rollbackID,
+		reversal("ROLLBACK", player, walletID, rollbackID, "25.00", refundID))
+	if status != http.StatusOK {
+		t.Fatalf("the rollback answered %d: %s", status, body)
+	}
+
+	// Back where a bet that was never refunded would have left it.
+	if got := readWallet(t, c.next(0), walletID).Balance.Amount; got != "75.00" {
+		t.Fatalf("balance = %s, want 75.00", got)
+	}
+	assertLedgerMatchesBalance(t, c.next(1), walletID)
 }
