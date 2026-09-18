@@ -55,7 +55,9 @@ var AdaptersModule = fx.Module("adapters",
 var UseCasesModule = fx.Module("usecases",
 	fx.Provide(
 		app.NewOpenWallet,
+		app.NewSubmitTransaction,
 		app.NewWalletQueries,
+		app.NewTransactionQueries,
 	),
 )
 
@@ -63,6 +65,7 @@ var UseCasesModule = fx.Module("usecases",
 var HTTPModule = fx.Module("http",
 	fx.Provide(
 		newWalletHandler,
+		newTransactionHandler,
 		newHealthHandler,
 		httpadapter.Routes,
 		httpadapter.Handler,
@@ -131,6 +134,10 @@ func newPool(lc fx.Lifecycle, appCfg AppConfig, dbCfg DatabaseConfig, logger *sl
 // annotation, just Go satisfying an interface.
 func newWalletHandler(open *app.OpenWallet, queries *app.WalletQueries) *httpadapter.WalletHandler {
 	return httpadapter.NewWalletHandler(open, queries)
+}
+
+func newTransactionHandler(submit *app.SubmitTransaction, queries *app.TransactionQueries) *httpadapter.TransactionHandler {
+	return httpadapter.NewTransactionHandler(submit, queries)
 }
 
 func newHealthHandler(probe *postgres.Probe) *httpadapter.HealthHandler {

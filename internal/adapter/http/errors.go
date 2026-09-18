@@ -104,6 +104,10 @@ func statusFor(err error) (int, string) {
 		return http.StatusConflict, "VERSION_MISMATCH"
 	case errors.Is(err, app.ErrInvalidInput):
 		return http.StatusBadRequest, "INVALID_INPUT"
+	case errors.Is(err, app.ErrNotImplemented):
+		// The request is valid and this build cannot serve it. 501 says that
+		// without pretending the client got something wrong.
+		return http.StatusNotImplemented, "NOT_IMPLEMENTED"
 	case errors.Is(err, app.ErrSerializationFailure):
 		// Transient: the database could not order two transactions. Retrying
 		// the same request is the right move, so it must not look permanent.

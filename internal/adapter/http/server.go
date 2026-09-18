@@ -21,12 +21,16 @@ import (
 // answers 405 with an Allow header and no code of ours. Specificity decides
 // between overlapping patterns, so the order here is for a reader, not for the
 // router.
-func Routes(wallets *WalletHandler, health *HealthHandler) *http.ServeMux {
+func Routes(wallets *WalletHandler, transactions *TransactionHandler, health *HealthHandler) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /wallets", wallets.Open)
 	mux.HandleFunc("GET /wallets/{walletId}", wallets.Get)
 	mux.HandleFunc("GET /wallets/{walletId}/ledger", wallets.Ledger)
+
+	mux.HandleFunc("POST /wagering/transactions", transactions.Submit)
+	mux.HandleFunc("GET /wagering/transactions/{transactionId}", transactions.Get)
+	mux.HandleFunc("GET /providers/{providerId}/wagering/transactions/{externalTransactionId}", transactions.GetByProvider)
 
 	mux.HandleFunc("GET /health/live", health.Live)
 	mux.HandleFunc("GET /health/ready", health.Ready)
