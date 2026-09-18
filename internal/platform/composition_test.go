@@ -58,9 +58,22 @@ func setTestEnv(t *testing.T, addr string) {
 		"DB_USER":              envOr("TEST_DB_USER", "wagering"),
 		"DB_PASSWORD":          envOr("TEST_DB_PASSWORD", "local-dev-only"),
 		"DB_SSLMODE":           "disable",
+
+		// Without these the SDK looks for real AWS, and the graph fails to
+		// build for a reason that has nothing to do with what is under test.
+		"QUEUE_ENDPOINT":        envOr("TEST_QUEUE_ENDPOINT", "http://localhost:4567"),
+		"QUEUE_REGION":          "us-east-1",
+		"QUEUE_WAIT_TIME":       "1s",
+		"AWS_ACCESS_KEY_ID":     "test",
+		"AWS_SECRET_ACCESS_KEY": "test",
 	} {
 		t.Setenv(key, value)
 	}
+
+	// A queue per test, so one run cannot consume another's messages.
+	unique := strings.ReplaceAll(time.Now().Format("150405.000000000"), ".", "")
+	t.Setenv("QUEUE_NAME", "composition-"+unique+".fifo")
+	t.Setenv("QUEUE_DLQ_NAME", "composition-dlq-"+unique+".fifo")
 }
 
 func envOr(key, fallback string) string {

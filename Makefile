@@ -45,8 +45,10 @@ race: ## Run the tests with the race detector
 test-integration: ## Run the integration tests (needs `make up-test`)
 	TEST_DB_PORT=5433 $(GO) test -tags integration -count=1 ./...
 
-test-concurrency: ## Run the multi-process scenarios (needs `make up-test`)
-	TEST_DB_PORT=5433 $(GO) test -tags integration -count=1 -timeout 300s -v ./test/
+test-scenarios: ## Run the multi-process scenarios (needs `make up-test`)
+	TEST_DB_PORT=5433 $(GO) test -tags integration -count=1 -timeout 900s -v ./test/
+
+test-concurrency: test-scenarios ## Alias kept for the name the docs used first
 
 cover: ## Run the tests with a coverage report
 	$(GO) test -coverprofile=coverage.out ./... && $(GO) tool cover -html=coverage.out -o coverage.html
@@ -56,8 +58,8 @@ check: fmt-check vet domain-check app-check test race ## Full gate before commit
 up: ## Start the local dependencies
 	docker compose up --build
 
-up-test: ## Start the isolated database used by the integration tests
-	docker compose --profile test up -d postgres-test
+up-test: ## Start the isolated database and queue used by the integration tests
+	docker compose --profile test up -d postgres-test localstack-test
 
 down: ## Stop the local dependencies and drop the volumes
 	docker compose down -v

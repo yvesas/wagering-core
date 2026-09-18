@@ -3,10 +3,10 @@
 > Este documento descreve o que **existe**, não o que está planejado. O desenho
 > pretendido vive em `specs/project/PROJECT.md` e no `spec.md` de cada feature.
 >
-> **Estado atual:** domínio, persistência, os cinco tipos de operação com
-> reversões e resolução de referência, idempotência persistente, coordenação por
-> carteira, a borda HTTP e o worker de pendências, compostos por Fx. Não há fila,
-> autenticação nem reconciliação.
+> **Estado atual:** domínio, persistência, os cinco tipos de operação, duas
+> portas de entrada — HTTP e fila — com registro de entrada, idempotência
+> persistente, coordenação por carteira e dois workers, compostos por Fx. Não há
+> publicação por registro de saída, autenticação nem reconciliação.
 
 ## O que existe
 
@@ -292,9 +292,50 @@ opostas.
 O estado da espera vive em coluna, então um reinício encontra o trabalho onde
 parou.
 
+## A fila
+
+O consumidor vê quatro métodos e nenhum vocabulário de transporte; o SDK da AWS
+fica contido em `internal/adapter/sqs`. A verificação: `go list -deps` sobre
+`internal/app` não traz nenhum pacote da AWS.
+
+**Duas camadas de deduplicação, e não são a mesma coisa.** O registro de entrada
+dedupa a **mensagem**; a idempotência dedupa a **operação financeira**. Duas
+mensagens diferentes carregando a mesma operação passam pelo registro de entrada
+e são barradas pela idempotência; a mesma mensagem entregue duas vezes é barrada
+antes de tocar o domínio.
+
+**A identidade é o `messageId` do envelope, não o da fila.** O id que o SQS dá à
+mensagem muda em alguns cenários de redrive, e usá-lo faria uma reentrega parecer
+mensagem nova. A unicidade é `(consumerName, messageId)`.
+
+**Um commit só.** O registro de entrada e o efeito no domínio são a mesma
+transação. Isso obrigou o caso de uso a ganhar duas formas: `Execute` abre a
+transação (é o que o HTTP usa) e `ExecuteIn` roda dentro da transação de quem
+chama (é o que o consumidor usa). As duas passam pelo mesmo código, então não há
+versão da regra para fila e versão para HTTP.
+
+**Commit primeiro, apagar depois.** Apagar antes perde a operação se o commit
+falhar. Apagar depois pode entregar duas vezes, e é exatamente isso que o
+registro de entrada absorve. A assimetria é a razão de ele existir.
+
+| Desfecho | Mensagem |
+|---|---|
+| Aplicada, ou já tratada | apaga |
+| Rejeição de negócio | apaga — é terminal, e reentregar não muda |
+| Envelope ilegível | apaga, com log alto |
+| Falha transitória | **devolve a visibilidade** para reentrega imediata |
+
+A fila de descarte é do broker: `maxReceiveCount` e redrive ficam na fila, não
+num contador nosso — que estaria em dois lugares e discordaria no primeiro
+reinício. Ver `docs/adr/0009-inbox-and-queue.md`.
+
+O `MessageGroupId` é a **carteira**, que é a mesma granularidade da coordenação
+(ADR 0007). Agrupar por provedor serializaria todas as carteiras dele atrás de
+uma só.
+
 ## O que os testes provam
 
-436 casos no total. `-race` limpo, inclusive nos cenários multi-processo.
+487 casos no total. `-race` limpo, inclusive nos cenários multi-processo.
 
 Os cenários de concorrência rodam em **três processos independentes**, não em
 goroutines. Goroutines compartilham pool e memória: provam que o código é seguro
@@ -322,6 +363,13 @@ Três guardas valem menção porque protegem invariante:
 - **Um `REFUND` e um `ROLLBACK` da mesma aposta**, soltos juntos em instâncias
   diferentes: um aplica, o outro recebe `ALREADY_REVERSED`, e os 25,00 voltam
   uma vez.
+- **A mesma operação por HTTP e por fila** move dinheiro uma vez: o registro de
+  entrada deixa passar (mensagem nova) e a idempotência barra (operação
+  conhecida).
+- **Dez entregas da mesma mensagem**, com ids de deduplicação distintos para a
+  janela do broker não filtrar: um débito.
+- **Um envelope ilegível não trava o consumidor** — numa fila FIFO, retentar
+  bloquearia tudo atrás dele.
 - Toda cena termina conferindo saldo armazenado contra créditos menos débitos,
   em unidades mínimas: usar float na verificação faria ela depender do que está
   verificando.
@@ -354,6 +402,5 @@ créditos menos débitos.
 
 ## O que ainda não existe
 
-Fila com registro de entrada, publicação por registro de saída, autenticação
-OIDC, métricas e reconciliação. A ordem em que entram está no plano de ação, fora do
+Publicação por registro de saída, autenticação OIDC, métricas e reconciliação. A ordem em que entram está no plano de ação, fora do
 repositório.

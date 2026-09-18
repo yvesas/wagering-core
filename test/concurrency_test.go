@@ -34,6 +34,35 @@ const instances = 3
 
 type cluster struct {
 	bases []string
+
+	// stop shuts each instance down. Calling it twice is safe, so a test can
+	// stop the cluster explicitly and the cleanup can still run.
+	stop []func()
+}
+
+// stopper sends an interrupt and waits, falling back to a kill.
+func stopper(cmd *exec.Cmd) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			_ = cmd.Process.Signal(os.Interrupt)
+			done := make(chan struct{})
+			go func() { _, _ = cmd.Process.Wait(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(15 * time.Second):
+				_ = cmd.Process.Kill()
+			}
+		})
+	}
+}
+
+// stopCluster shuts every instance down and waits for them.
+func stopCluster(t *testing.T, c cluster) {
+	t.Helper()
+	for _, stop := range c.stop {
+		stop()
+	}
 }
 
 // next spreads requests across the instances, round robin by index, so a
@@ -83,6 +112,13 @@ func startClusterWith(t *testing.T, overrides map[string]string) cluster {
 		"DB_USER="+envOr("TEST_DB_USER", "wagering"),
 		"DB_PASSWORD="+envOr("TEST_DB_PASSWORD", "local-dev-only"),
 		"DB_SSLMODE=disable",
+		"QUEUE_ENDPOINT="+envOr("TEST_QUEUE_ENDPOINT", "http://localhost:4567"),
+		"QUEUE_REGION=us-east-1",
+		"AWS_ACCESS_KEY_ID=test",
+		"AWS_SECRET_ACCESS_KEY=test",
+		// Short polling in tests: the production ten seconds would make every
+		// shutdown assertion wait for it.
+		"QUEUE_WAIT_TIME=1s",
 	)
 
 	for key, value := range overrides {
@@ -99,16 +135,9 @@ func startClusterWith(t *testing.T, overrides map[string]string) cluster {
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("starting instance %d: %v", i, err)
 		}
-		t.Cleanup(func() {
-			_ = cmd.Process.Signal(os.Interrupt)
-			done := make(chan struct{})
-			go func() { _, _ = cmd.Process.Wait(); close(done) }()
-			select {
-			case <-done:
-			case <-time.After(10 * time.Second):
-				_ = cmd.Process.Kill()
-			}
-		})
+		stop := stopper(cmd)
+		c.stop = append(c.stop, stop)
+		t.Cleanup(stop)
 
 		base := "http://" + addr
 		waitReady(t, base)

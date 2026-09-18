@@ -25,9 +25,10 @@ repositório, na pasta de controle ao lado.
 | 5 | Concorrência por carteira | pronta |
 
 | 6 | Reversões e resolução de referência | pronta |
+| 7 | Consumo por fila, com registro de entrada | pronta |
 
-Fases 7 a 10 — consumo por fila, publicação por registro de saída, autenticação,
-observabilidade — estão especificadas em `specs/project/REQUIREMENTS.md`.
+Fases 8 a 10 — publicação por registro de saída, autenticação, observabilidade —
+estão especificadas em `specs/project/REQUIREMENTS.md`.
 
 ## Pré-requisitos
 
@@ -53,6 +54,7 @@ make up               # sobe PostgreSQL e demais dependências locais
 make check            # fmt + vet + domain-check + app-check + test + race
 make up-test          # sobe o PostgreSQL isolado dos testes
 make test-integration # testes contra o banco de verdade
+make test-scenarios   # cenários multi-processo, com fila real
 make test     # go test ./...
 make race     # go test -race ./...
 make vet      # go vet ./...
