@@ -20,7 +20,7 @@ repositório, na pasta de controle ao lado.
 |---|---|---|
 | 1 | Núcleo de domínio: valor monetário, carteira, ledger, transação | pronta |
 | 2 | Persistência, migrations e constraints | pronta |
-| 3 | Abertura de carteira, HTTP e composição por DI | a fazer |
+| 3 | Abertura de carteira, HTTP e composição por DI | pronta |
 | 4 | Idempotência persistente e replay | a fazer |
 | 5 | Concorrência por carteira | a fazer |
 
@@ -72,6 +72,7 @@ versionado com valores locais de exemplo; `.env` nunca é.
 
 | O quê | Onde |
 |---|---|
+| Contrato da API | `docs/api.md` |
 | Visão, princípios e stack | `specs/project/PROJECT.md` |
 | Requisitos com ID rastreável | `specs/project/REQUIREMENTS.md` |
 | O que está sendo construído agora | `specs/features/NNNN-slug/spec.md` |

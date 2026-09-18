@@ -1,6 +1,6 @@
 # 0003 — Abertura de carteira e HTTP
 
-- **Status:** em implementação
+- **Status:** implementada · 341 casos no total · `-race` limpo
 - **Requisitos cobertos:** `REQ-API-001..006` · `REQ-API-009` · `REQ-WAL-005` ·
   `REQ-TRX-008..009` · `REQ-TST-004`
 - **Depende de:** features 0001 e 0002 (concluídas)
@@ -58,16 +58,18 @@ GET  /health/ready                 as dependências respondem
 | C7 | `/health/live` responde sem tocar em dependência; `/health/ready` reporta o banco. |
 | C8 | Log em JSON com `correlationId`, sem credencial e sem payload financeiro completo. |
 
-## Áreas cinzentas — decidir durante
+## Áreas cinzentas — resolvidas
 
-**Geração de identidade.** UUIDv7 ordena por tempo, o que ajuda índice e
-paginação; a stdlib não traz UUID. Escrever à mão são trinta linhas e é o tipo de
-coisa que parece esperta e não é. Decidir em **F3.1**.
+**Identidade → UUIDv7 via `google/uuid`.** Ordena por tempo; escrever à mão é o
+tipo de trinta linhas cujo erro aparece tarde, como chave duplicada sob carga.
 
-**`PENDING` intermediário na abertura.** O enunciado permite concluir de forma
-síncrona operações sem dependência. A abertura é confirmada junto com a carteira,
-então não há janela — vale registrar por que, para a fase 4 não repetir a
-pergunta.
+**Abertura → sem `PENDING` intermediário.** Não depende de nada e é confirmada
+junto da carteira: não há janela entre aceitar e aplicar.
+
+**Descoberto no caminho:** `platform` montar `postgres` criou ciclo de import,
+porque `postgres.NewPool` usava o tipo de config do `platform`. O adaptador
+passou a ter o próprio — adaptador que importa quem o monta não pode ser montado
+por mais ninguém.
 
 ## Como se prova que está pronto
 

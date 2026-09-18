@@ -3,8 +3,8 @@
 > Este documento descreve o que **existe**, não o que está planejado. O desenho
 > pretendido vive em `specs/project/PROJECT.md` e no `spec.md` de cada feature.
 >
-> **Estado atual:** domínio e persistência. Não há HTTP, fila, autenticação nem
-> composição por injeção de dependência.
+> **Estado atual:** domínio, persistência, o primeiro caso de uso e a borda
+> HTTP, compostos por Fx. Não há fila, autenticação nem operações de aposta.
 
 ## O que existe
 
@@ -27,9 +27,22 @@ internal/adapter/postgres/  a implementação
 ├── errors.go               tradução de SQLSTATE na borda
 ├── pool.go · migrate.go    pool e migrations embarcadas
 
+internal/adapter/http/      a borda de entrada
+├── server.go               rotas, middleware, timeouts
+├── wallet.go               handlers e DTOs
+├── health.go               liveness e readiness
+└── errors.go               erro → status, tabela exaustiva
+
+internal/adapter/system/    relógio e geração de identidade (UUIDv7)
+
+internal/platform/          o único lugar que conhece Fx, junto de cmd/
+├── modules.go              os módulos e os hooks de ciclo de vida
+├── app.go                  configuração de processo e logger
+└── config.go               configuração de banco
+
 migrations/                 o SQL versionado, embarcado por go:embed
 cmd/migrate/                aplica, reverte e reporta a versão
-internal/platform/          configuração
+cmd/api/                    o servidor
 ```
 
 Duas regras rodam dentro do `make check`: `domain-check` garante que
@@ -154,10 +167,49 @@ Consequência prática: teste de integração não limpa o que criou. Não dá `
 nem `TRUNCATE` no ledger. Os testes usam identificadores únicos por execução, o
 que dá isolamento sem precisar desfazer nada.
 
+## Composição e ciclo de vida
+
+Fx vive em `internal/platform` e `cmd/`, e mais nada o conhece —
+`make app-check` falha se `internal/app` importar. Tudo que ele monta é
+construtor comum, o que faz o mesmo código ser montado por três linhas num
+teste. Ver `docs/adr/0004-fx-only-at-the-edge.md`.
+
+O start **valida**: o pool dá ping, as migrations rodam e configuração
+malformada falha nomeando o que está errado. `APP_SHUTDOWN_TIMEOUT=30` sem
+unidade é recusado em vez de cair no padrão.
+
+O listener abre **dentro do hook de start**, não dentro do `Serve`. Deixado para
+a goroutine, porta ocupada faria o processo reportar "started" e não servir nada.
+
+Os `OnStop` rodam na ordem inversa dos `OnStart`, e é só isso que garante que o
+**pool feche depois do servidor drenar**. Fechado antes, toda requisição que o
+drain existe para terminar falharia com conexão morta no último milissegundo.
+
+## A borda HTTP
+
+`net/http` puro. Desde o Go 1.22 o `ServeMux` casa método e extrai curinga de
+caminho, que eram as duas razões da dependência. Ver
+`docs/adr/0005-stdlib-http.md`.
+
+A tabela de erro → status é **exaustiva sobre os códigos do domínio**, e um
+teste lê o código-fonte do domínio para provar que continua. Código sem
+mapeamento viraria 500: erro do cliente reportado como culpa nossa.
+
+Conflito responde com código desta API, não com nome de constraint. Devolver o
+nome vazaria detalhe de schema e faria o tratamento de erro do cliente depender
+dele — renomear constraint é migration, não mudança de contrato.
+
+Contrato completo em `docs/api.md`.
+
 ## O que os testes provam
 
-231 casos de unidade no domínio (96% de cobertura) e 26 de integração contra
-PostgreSQL de verdade, `-race` limpo nos dois.
+341 casos no total: unidade no domínio, no caso de uso e nos handlers, mais
+integração contra PostgreSQL de verdade. `-race` limpo.
+
+O teste da composição sobe o grafo inteiro, atende uma requisição real de ponta
+a ponta e encerra — grafo validado sem start não prova a ordem do encerramento,
+que é justamente o que importa. Ele também confere as três formas de o start
+falhar: banco inalcançável, configuração malformada e porta ocupada.
 
 Cada constraint tem um teste que **a viola de propósito**, vários mandando SQL
 direto, passando por fora do domínio. Regra que o domínio também impõe ainda
@@ -182,6 +234,6 @@ créditos menos débitos.
 
 ## O que ainda não existe
 
-Casos de uso, HTTP, idempotência, concorrência, fila, outbox, autenticação e
-observabilidade. A ordem em que entram está no plano de ação, fora do
+Operações de aposta, idempotência, concorrência, fila, outbox, autenticação,
+métricas e reconciliação. A ordem em que entram está no plano de ação, fora do
 repositório.
