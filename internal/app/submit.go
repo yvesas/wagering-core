@@ -47,28 +47,20 @@ func NewSubmitTransaction(uow UnitOfWork, queries Queries, ids IDGenerator, cloc
 	return &SubmitTransaction{uow: uow, queries: queries, ids: ids, clock: clock, waiting: waiting.normalised()}
 }
 
-// Execute records and applies the operation.
+// Execute opens a transaction and applies the operation.
 //
-// The shape is deliberate: look for an existing result, then try to write, then
-// treat a uniqueness violation as the authoritative answer. The lookup is an
-// optimisation -- most resends are resends -- and the constraint is the actual
-// guarantee. Between a lookup and an insert, five more copies of the same
-// request fit; all of them would find nothing and all of them would proceed.
-// See docs/adr/0006-idempotency-hash.md.
+// This is the HTTP path. The queue path shares [SubmitTransaction.ExecuteIn]
+// instead, because the inbox record has to land in the same commit -- see
+// docs/adr/0009-inbox-and-queue.md. Both go through the same code below, so
+// there is no queue version of the rules and no HTTP version of them.
 func (uc *SubmitTransaction) Execute(ctx context.Context, cmd SubmitCommand) (SubmitResult, error) {
-	parsed, err := uc.parse(cmd)
-	if err != nil {
-		return SubmitResult{}, err
-	}
+	var result SubmitResult
 
-	// Fast path: an operation we have already seen.
-	if existing, err := uc.queries.Transactions().FindByBusinessID(ctx, parsed.providerID, parsed.externalID); err == nil {
-		return uc.replay(existing, parsed)
-	} else if !errors.Is(err, ErrNotFound) {
-		return SubmitResult{}, err
-	}
-
-	result, err := uc.apply(ctx, parsed)
+	err := uc.uow.Do(ctx, func(ctx context.Context, repos Repositories) error {
+		var err error
+		result, err = uc.ExecuteIn(ctx, repos, cmd)
+		return err
+	})
 	if err == nil {
 		return result, nil
 	}
@@ -84,6 +76,10 @@ func (uc *SubmitTransaction) Execute(ctx context.Context, cmd SubmitCommand) (Su
 			"%w: the idempotency key belongs to another operation", ErrConflict)
 	}
 
+	parsed, parseErr := uc.parse(cmd)
+	if parseErr != nil {
+		return SubmitResult{}, parseErr
+	}
 	existing, readErr := uc.queries.Transactions().FindByBusinessID(ctx, parsed.providerID, parsed.externalID)
 	if readErr != nil {
 		// The insert was refused for a uniqueness reason we cannot resolve into
@@ -92,6 +88,30 @@ func (uc *SubmitTransaction) Execute(ctx context.Context, cmd SubmitCommand) (Su
 		return SubmitResult{}, err
 	}
 	return uc.replay(existing, parsed)
+}
+
+// ExecuteIn applies the operation inside a transaction the caller owns.
+//
+// The lookup happens here rather than before the transaction, so it sees the
+// same snapshot everything else in this commit sees. On the HTTP path that
+// costs nothing; on the queue path it is what lets the inbox record and the
+// financial effect be one commit.
+func (uc *SubmitTransaction) ExecuteIn(ctx context.Context, repos Repositories, cmd SubmitCommand) (SubmitResult, error) {
+	parsed, err := uc.parse(cmd)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+
+	// An operation we have already applied: answer from what is stored.
+	existing, err := repos.Transactions().FindByBusinessID(ctx, parsed.providerID, parsed.externalID)
+	switch {
+	case err == nil:
+		return uc.replay(existing, parsed)
+	case !errors.Is(err, ErrNotFound):
+		return SubmitResult{}, err
+	}
+
+	return uc.apply(ctx, repos, parsed)
 }
 
 // constraintIdempotencyKey is the index that catches a key reused for different
@@ -189,8 +209,8 @@ func (uc *SubmitTransaction) parse(cmd SubmitCommand) (parsedSubmit, error) {
 	return p, nil
 }
 
-// apply writes the operation and its effect in one transaction.
-func (uc *SubmitTransaction) apply(ctx context.Context, p parsedSubmit) (SubmitResult, error) {
+// apply writes the operation and its effect, inside the caller's transaction.
+func (uc *SubmitTransaction) apply(ctx context.Context, repos Repositories, p parsedSubmit) (SubmitResult, error) {
 	transactionID, err := uc.ids.NewTransactionID(ctx)
 	if err != nil {
 		return SubmitResult{}, fmt.Errorf("minting a transaction id: %w", err)
@@ -216,77 +236,62 @@ func (uc *SubmitTransaction) apply(ctx context.Context, p parsedSubmit) (SubmitR
 		return SubmitResult{}, err
 	}
 
-	var result SubmitResult
-	err = uc.uow.Do(ctx, func(ctx context.Context, repos Repositories) error {
-		// Locking, not just reading. Two bets on the same wallet queue here
-		// instead of both deciding against the same balance -- and the read
-		// happens inside the callback, so a retry sees fresh state rather than
-		// re-deciding on the numbers that already lost.
-		wallet, err := repos.Wallets().FindByIDForUpdate(ctx, p.walletID)
-		if err != nil {
-			return err
-		}
-		if wallet.PlayerID() != p.playerID {
-			return fmt.Errorf("%w: the wallet does not belong to that player", ErrInvalidInput)
-		}
-
-		// A reversal has to find what it undoes before it can do anything, and
-		// the lookup happens here -- inside the transaction, after the wallet
-		// is locked -- so nothing can reverse the same operation in between.
-		if transaction.Kind().IsReversal() {
-			outcome, err := uc.resolve(ctx, repos, transaction, wallet, at)
-			if err != nil {
-				return err
-			}
-			result = outcome
-			return nil
-		}
-
-		movement, moved, err := uc.movement(ctx, wallet, transaction, transactionID, at)
-		if err != nil {
-			rejected, rejectErr := uc.reject(transaction, err, at)
-			if rejectErr != nil {
-				// Not a business rejection: infrastructure, or a transition the
-				// domain refused. Either way it rolls back and stays retryable.
-				return rejectErr
-			}
-			if err := repos.Transactions().Insert(ctx, rejected); err != nil {
-				return err
-			}
-			// Committing on purpose: the rejection *is* the result, and a
-			// resend has to read it rather than try again.
-			result = SubmitResult{Transaction: rejected, Balance: wallet.Balance()}
-			return nil
-		}
-
-		applied, err := transaction.MarkProcessed(balanceAfter(wallet, movement, moved), at)
-		if err != nil {
-			return err
-		}
-		if err := repos.Transactions().Insert(ctx, applied); err != nil {
-			return err
-		}
-
-		if !moved {
-			// LOSS moves nothing: no ledger entry, no version bump, and the
-			// balance reported is the one the wallet already had.
-			result = SubmitResult{Transaction: applied, Balance: wallet.Balance()}
-			return nil
-		}
-
-		if err := repos.Wallets().UpdateBalance(ctx, movement.Wallet, wallet.Version()); err != nil {
-			return err
-		}
-		if err := repos.Ledger().Append(ctx, movement.Entry); err != nil {
-			return err
-		}
-		result = SubmitResult{Transaction: applied, Balance: movement.Wallet.Balance()}
-		return nil
-	})
+	// Locking, not just reading. Two bets on the same wallet queue here instead
+	// of both deciding against the same balance -- and the read happens inside
+	// the transaction, so a retry sees fresh state rather than re-deciding on
+	// the numbers that already lost.
+	wallet, err := repos.Wallets().FindByIDForUpdate(ctx, p.walletID)
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	return result, nil
+	if wallet.PlayerID() != p.playerID {
+		return SubmitResult{}, fmt.Errorf("%w: the wallet does not belong to that player", ErrInvalidInput)
+	}
+
+	// A reversal has to find what it undoes before it can do anything, and the
+	// lookup happens here -- after the wallet is locked -- so nothing can
+	// reverse the same operation in between.
+	if transaction.Kind().IsReversal() {
+		return uc.resolve(ctx, repos, transaction, wallet, at)
+	}
+
+	movement, moved, err := uc.movement(ctx, wallet, transaction, transactionID, at)
+	if err != nil {
+		rejected, rejectErr := uc.reject(transaction, err, at)
+		if rejectErr != nil {
+			// Not a business rejection: infrastructure, or a transition the
+			// domain refused. Either way it rolls back and stays retryable.
+			return SubmitResult{}, rejectErr
+		}
+		if err := repos.Transactions().Insert(ctx, rejected); err != nil {
+			return SubmitResult{}, err
+		}
+		// The rejection *is* the result, and a resend has to read it rather
+		// than try again.
+		return SubmitResult{Transaction: rejected, Balance: wallet.Balance()}, nil
+	}
+
+	applied, err := transaction.MarkProcessed(balanceAfter(wallet, movement, moved), at)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	if err := repos.Transactions().Insert(ctx, applied); err != nil {
+		return SubmitResult{}, err
+	}
+
+	if !moved {
+		// LOSS moves nothing: no ledger entry, no version bump, and the balance
+		// reported is the one the wallet already had.
+		return SubmitResult{Transaction: applied, Balance: wallet.Balance()}, nil
+	}
+
+	if err := repos.Wallets().UpdateBalance(ctx, movement.Wallet, wallet.Version()); err != nil {
+		return SubmitResult{}, err
+	}
+	if err := repos.Ledger().Append(ctx, movement.Entry); err != nil {
+		return SubmitResult{}, err
+	}
+	return SubmitResult{Transaction: applied, Balance: movement.Wallet.Balance()}, nil
 }
 
 func balanceAfter(wallet domain.Wallet, movement domain.Movement, moved bool) domain.Money {
