@@ -40,10 +40,11 @@ type SubmitTransaction struct {
 	queries Queries
 	ids     IDGenerator
 	clock   Clock
+	waiting ReferencePolicy
 }
 
-func NewSubmitTransaction(uow UnitOfWork, queries Queries, ids IDGenerator, clock Clock) *SubmitTransaction {
-	return &SubmitTransaction{uow: uow, queries: queries, ids: ids, clock: clock}
+func NewSubmitTransaction(uow UnitOfWork, queries Queries, ids IDGenerator, clock Clock, waiting ReferencePolicy) *SubmitTransaction {
+	return &SubmitTransaction{uow: uow, queries: queries, ids: ids, clock: clock, waiting: waiting.normalised()}
 }
 
 // Execute records and applies the operation.
@@ -171,13 +172,6 @@ func (uc *SubmitTransaction) parse(cmd SubmitCommand) (parsedSubmit, error) {
 	if !p.kind.Valid() {
 		return parsedSubmit{}, fmt.Errorf("unknown kind %q: %w", cmd.Kind, domain.ErrInvalidKind)
 	}
-	if p.kind.IsReversal() {
-		// Reversals resolve a reference before they can be applied, and that
-		// machinery does not exist yet. Saying so plainly beats accepting the
-		// operation and quietly doing something else with it.
-		return parsedSubmit{}, fmt.Errorf("%w: %s is not supported yet", ErrNotImplemented, p.kind)
-	}
-
 	currency, err := domain.ParseCurrency(cmd.Currency)
 	if err != nil {
 		return parsedSubmit{}, err
@@ -234,6 +228,18 @@ func (uc *SubmitTransaction) apply(ctx context.Context, p parsedSubmit) (SubmitR
 		}
 		if wallet.PlayerID() != p.playerID {
 			return fmt.Errorf("%w: the wallet does not belong to that player", ErrInvalidInput)
+		}
+
+		// A reversal has to find what it undoes before it can do anything, and
+		// the lookup happens here -- inside the transaction, after the wallet
+		// is locked -- so nothing can reverse the same operation in between.
+		if transaction.Kind().IsReversal() {
+			outcome, err := uc.resolve(ctx, repos, transaction, wallet, at)
+			if err != nil {
+				return err
+			}
+			result = outcome
+			return nil
 		}
 
 		movement, moved, err := uc.movement(ctx, wallet, transaction, transactionID, at)
@@ -334,4 +340,137 @@ func (uc *SubmitTransaction) reject(transaction domain.WagerTransaction, cause e
 		return domain.WagerTransaction{}, cause
 	}
 	return transaction.Reject(de.Code, at)
+}
+
+// resolve applies a reversal, parks it, or records its rejection.
+func (uc *SubmitTransaction) resolve(
+	ctx context.Context,
+	repos Repositories,
+	reversal domain.WagerTransaction,
+	wallet domain.Wallet,
+	at time.Time,
+) (SubmitResult, error) {
+	decision, err := resolveReference(ctx, repos, reversal)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+
+	switch decision.outcome {
+	case resolveWait:
+		// Out-of-order delivery: the reversal overtook what it undoes. It is
+		// recorded as waiting, with its own schedule and deadline, and the
+		// worker takes it from here.
+		parked, err := reversal.MarkPendingReference(at,
+			uc.waiting.nextAttemptAt(at, 1), at.Add(uc.waiting.TTL))
+		if err != nil {
+			return SubmitResult{}, err
+		}
+		if err := repos.Transactions().Insert(ctx, parked); err != nil {
+			return SubmitResult{}, err
+		}
+		return SubmitResult{Transaction: parked, Balance: wallet.Balance()}, nil
+
+	case resolveReject:
+		return uc.recordReversalRejection(ctx, repos, reversal, decision.code, wallet, at)
+	}
+
+	applied, movement, err := applyReversal(ctx, repos, uc.ids, reversal, decision, wallet, at)
+	if err != nil {
+		var de *domain.Error
+		if !errors.As(err, &de) {
+			return SubmitResult{}, err
+		}
+		return uc.recordReversalRejection(ctx, repos, reversal, de.Code, wallet, at)
+	}
+
+	return SubmitResult{Transaction: applied, Balance: movement.Wallet.Balance()}, nil
+}
+
+func (uc *SubmitTransaction) recordReversalRejection(
+	ctx context.Context,
+	repos Repositories,
+	reversal domain.WagerTransaction,
+	code domain.Code,
+	wallet domain.Wallet,
+	at time.Time,
+) (SubmitResult, error) {
+	rejected, err := reversal.Reject(code, at)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+	if err := repos.Transactions().Insert(ctx, rejected); err != nil {
+		return SubmitResult{}, err
+	}
+	return SubmitResult{Transaction: rejected, Balance: wallet.Balance()}, nil
+}
+
+// applyReversal moves the money the reversal undoes and writes everything.
+//
+// It is shared with the worker: a reversal that waited and one that applied
+// straight away must end in exactly the same state, and two copies of this
+// would drift the first time one of them was fixed.
+func applyReversal(
+	ctx context.Context,
+	repos Repositories,
+	ids IDGenerator,
+	reversal domain.WagerTransaction,
+	decision resolution,
+	wallet domain.Wallet,
+	at time.Time,
+) (domain.WagerTransaction, domain.Movement, error) {
+	entryID, err := ids.NewLedgerEntryID(ctx)
+	if err != nil {
+		return domain.WagerTransaction{}, domain.Movement{}, err
+	}
+
+	var movement domain.Movement
+	switch decision.direction {
+	case domain.Credit:
+		movement, err = wallet.Credit(entryID, reversal.ID(), reversal.Money(), at)
+	default:
+		movement, err = wallet.Debit(entryID, reversal.ID(), reversal.Money(), at)
+		if err != nil && errors.Is(err, domain.ErrInsufficientFunds) {
+			// Money that was already handed over and cannot be taken back. It
+			// is a reconciliation problem, not a player hitting their limit,
+			// and giving it the bet's code would bury it in that volume.
+			err = &domain.Error{
+				Code: domain.CodeReversalExceedsBalance,
+				Detail: "reversing " + reversal.Money().String() +
+					" needs more than the " + wallet.Balance().String() + " available",
+			}
+		}
+	}
+	if err != nil {
+		return domain.WagerTransaction{}, domain.Movement{}, err
+	}
+
+	resolved, err := reversal.ResolveReference(decision.reference.ID(), at)
+	if err != nil {
+		return domain.WagerTransaction{}, domain.Movement{}, err
+	}
+	applied, err := resolved.MarkProcessed(movement.Wallet.Balance(), at)
+	if err != nil {
+		return domain.WagerTransaction{}, domain.Movement{}, err
+	}
+
+	if err := writeReversal(ctx, repos, applied, movement, wallet.Version()); err != nil {
+		return domain.WagerTransaction{}, domain.Movement{}, err
+	}
+	return applied, movement, nil
+}
+
+// writeReversal persists an applied reversal. The transaction row may already
+// exist -- when it waited -- so the caller says which.
+func writeReversal(ctx context.Context, repos Repositories, applied domain.WagerTransaction, movement domain.Movement, expectedVersion int64) error {
+	if applied.ReferenceAttempts() > 0 {
+		if err := repos.Transactions().Update(ctx, applied); err != nil {
+			return err
+		}
+	} else if err := repos.Transactions().Insert(ctx, applied); err != nil {
+		return err
+	}
+	if err := repos.Wallets().UpdateBalance(ctx, movement.Wallet, expectedVersion); err != nil {
+		return err
+	}
+	return repos.Ledger().Append(ctx, movement.Entry)
 }

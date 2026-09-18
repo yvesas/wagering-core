@@ -132,9 +132,9 @@ func submitStatus(result app.SubmitResult) int {
 	case domain.StatusRejected, domain.StatusFailed:
 		return http.StatusUnprocessableEntity
 	case domain.StatusPending, domain.StatusPendingReference:
-		// Accepted and not yet applied. Nothing produces this today -- the
-		// operations that exist complete inside the request -- and it is here
-		// because the state machine allows it and a silent 200 would be wrong.
+		// Accepted and not yet applied: a reversal whose target has not arrived
+		// is waiting for it. 202 rather than 200 because nothing has moved yet,
+		// and rather than an error because it still might.
 		return http.StatusAccepted
 	default:
 		return http.StatusOK
