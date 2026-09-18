@@ -4,7 +4,7 @@ GO ?= go
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup fmt fmt-check vet domain-check app-check test race cover check up up-test down logs test-integration
+.PHONY: help setup fmt fmt-check vet domain-check app-check test race cover check up up-test down logs test-integration test-concurrency
 
 help: ## List the available targets
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -44,6 +44,9 @@ race: ## Run the tests with the race detector
 
 test-integration: ## Run the integration tests (needs `make up-test`)
 	TEST_DB_PORT=5433 $(GO) test -tags integration -count=1 ./...
+
+test-concurrency: ## Run the multi-process scenarios (needs `make up-test`)
+	TEST_DB_PORT=5433 $(GO) test -tags integration -count=1 -timeout 300s -v ./test/
 
 cover: ## Run the tests with a coverage report
 	$(GO) test -coverprofile=coverage.out ./... && $(GO) tool cover -html=coverage.out -o coverage.html

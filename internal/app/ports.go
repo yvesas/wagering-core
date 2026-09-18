@@ -25,6 +25,13 @@ type WalletReader interface {
 type WalletRepository interface {
 	WalletReader
 
+	// FindByIDForUpdate reads the wallet and holds its row until the
+	// transaction ends, so concurrent writers to the same wallet queue instead
+	// of racing. It is on the write port and not on WalletReader because
+	// locking a row outside a transaction means nothing -- the compiler is what
+	// keeps that from being attempted. See docs/adr/0007-per-wallet-concurrency.md.
+	FindByIDForUpdate(ctx context.Context, id domain.WalletID) (domain.Wallet, error)
+
 	Insert(ctx context.Context, wallet domain.Wallet) error
 
 	// UpdateBalance writes the new balance only while the stored version is

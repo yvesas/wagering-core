@@ -224,7 +224,11 @@ func (uc *SubmitTransaction) apply(ctx context.Context, p parsedSubmit) (SubmitR
 
 	var result SubmitResult
 	err = uc.uow.Do(ctx, func(ctx context.Context, repos Repositories) error {
-		wallet, err := repos.Wallets().FindByID(ctx, p.walletID)
+		// Locking, not just reading. Two bets on the same wallet queue here
+		// instead of both deciding against the same balance -- and the read
+		// happens inside the callback, so a retry sees fresh state rather than
+		// re-deciding on the numbers that already lost.
+		wallet, err := repos.Wallets().FindByIDForUpdate(ctx, p.walletID)
 		if err != nil {
 			return err
 		}

@@ -3,9 +3,9 @@
 > Este documento descreve o que **existe**, não o que está planejado. O desenho
 > pretendido vive em `specs/project/PROJECT.md` e no `spec.md` de cada feature.
 >
-> **Estado atual:** domínio, persistência, casos de uso de abertura e envio de
-> operação com idempotência persistente, e a borda HTTP composta por Fx. Não há
-> fila, autenticação nem reversões.
+> **Estado atual:** domínio, persistência, abertura e envio de operação com
+> idempotência persistente e coordenação por carteira, e a borda HTTP composta
+> por Fx. Não há fila, autenticação nem reversões.
 
 ## O que existe
 
@@ -226,10 +226,42 @@ reescrita em silêncio é hash que ninguém reproduz. Ver
 o primeiro envio falharia e o replay teria sucesso, porque um replay lê linha
 gravada e não tem o que falhar.
 
+## Concorrência
+
+Três camadas, e a primeira é a que coordena de verdade — ver
+`docs/adr/0007-per-wallet-concurrency.md`.
+
+**`SELECT ... FOR UPDATE` na linha da carteira**, dentro da transação. Trava-se
+uma linha, não uma tabela: carteira A não faz carteira B esperar, que é a
+definição de "carteiras independentes avançam em paralelo".
+
+**`UPDATE` condicionado à versão** continua, como segunda garantia. Não é
+redundância: o `FOR UPDATE` protege quem passou por ele, e um caso de uso futuro
+que leia sem travar e depois escreva não é protegido por nada.
+
+**Retry com backoff e jitter, limitado**, no unit of work. Só repete o que é
+transitório — falha de serialização, deadlock, conflito de versão. Rejeição de
+negócio nunca: saldo insuficiente não melhora tentando de novo, e repetir
+transformaria uma recusa numa espera.
+
+O jitter é o ponto. Sem ele, os escritores que colidiram juntos dormem o mesmo
+tempo e colidem de novo no mesmo instante — o backoff sincronizaria exatamente o
+que deveria espalhar.
+
+**Uma transação trava exatamente uma linha de carteira, e sempre a carteira.**
+Com um só recurso travado não há ciclo, então não há deadlock por ordenação.
+Isso constrange o código futuro: uma operação que precise de duas carteiras terá
+de travá-las por identificador crescente.
+
 ## O que os testes provam
 
-390 casos no total: unidade no domínio, nos casos de uso e nos handlers, mais
-integração contra PostgreSQL de verdade. `-race` limpo.
+407 casos no total. `-race` limpo, inclusive nos cenários multi-processo.
+
+Os cenários de concorrência rodam em **três processos independentes**, não em
+goroutines. Goroutines compartilham pool e memória: provam que o código é seguro
+para threads, não que a garantia está no banco — um bug que dependesse de lock
+local passaria em todas elas. `make test-concurrency` compila o servidor, sobe
+três instâncias contra o mesmo banco e dispara nas três.
 
 Três guardas valem menção porque protegem invariante:
 
@@ -240,6 +272,15 @@ Três guardas valem menção porque protegem invariante:
   outro contra o mesmo banco e reenvia. É a única forma honesta de mostrar que a
   idempotência mora no banco.
 - **Vinte duplicatas concorrentes**, soltas juntas, movem dinheiro uma vez.
+- **Duas apostas de 80,00 sobre 100,00**, de processos diferentes: uma
+  processada, uma rejeitada por saldo insuficiente, saldo 20,00, um único
+  débito.
+- **Cinquenta cópias idênticas** em três processos: um débito, versão 2.
+- **Quarenta apostas distintas numa carteira**: todas passam. Removendo o
+  `FOR UPDATE`, esse é o teste que falha — com 409, não com saldo errado.
+- Toda cena termina conferindo saldo armazenado contra créditos menos débitos,
+  em unidades mínimas: usar float na verificação faria ela depender do que está
+  verificando.
 
 O teste da composição sobe o grafo inteiro, atende uma requisição real de ponta
 a ponta e encerra — grafo validado sem start não prova a ordem do encerramento,
@@ -269,6 +310,6 @@ créditos menos débitos.
 
 ## O que ainda não existe
 
-Reversões (`REFUND`, `ROLLBACK`, que hoje respondem 501), retry sob conflito de
-versão, fila, outbox, autenticação, métricas e reconciliação. A ordem em que entram está no plano de ação, fora do
+Reversões (`REFUND`, `ROLLBACK`, que hoje respondem 501), fila, outbox,
+autenticação, métricas e reconciliação. A ordem em que entram está no plano de ação, fora do
 repositório.
