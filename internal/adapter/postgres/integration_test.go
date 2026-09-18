@@ -13,6 +13,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -25,8 +27,30 @@ import (
 
 	"github.com/yvesas/wagering-core/internal/app"
 	"github.com/yvesas/wagering-core/internal/domain"
-	"github.com/yvesas/wagering-core/internal/platform"
 )
+
+// testDatabase is the connection for these tests.
+//
+// It builds its own DSN instead of borrowing the composition layer's config:
+// that package now wires this one, and importing it back would be an import
+// cycle. The adapter staying independent of what composes it is the point.
+type testDatabase struct {
+	host, port, name, user, password string
+}
+
+func (d testDatabase) dsn() string {
+	return (&url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(d.user, d.password),
+		Host:     net.JoinHostPort(d.host, d.port),
+		Path:     "/" + d.name,
+		RawQuery: "sslmode=disable",
+	}).String()
+}
+
+func (d testDatabase) label() string {
+	return fmt.Sprintf("postgres://%s:xxxxx@%s:%s/%s", d.user, d.host, d.port, d.name)
+}
 
 var testPool *pgxpool.Pool
 
@@ -40,22 +64,21 @@ func uniqueSuffix() string { return fmt.Sprintf("%d-%d", time.Now().UnixNano(), 
 func TestMain(m *testing.M) {
 	ctx := context.Background()
 
-	cfg := platform.DatabaseConfig{
-		Host:     envOr("TEST_DB_HOST", "localhost"),
-		Port:     envOr("TEST_DB_PORT", "5433"),
-		Name:     envOr("TEST_DB_NAME", "wagering_test"),
-		User:     envOr("TEST_DB_USER", "wagering"),
-		Password: envOr("TEST_DB_PASSWORD", "local-dev-only"),
-		SSLMode:  "disable",
+	cfg := testDatabase{
+		host:     envOr("TEST_DB_HOST", "localhost"),
+		port:     envOr("TEST_DB_PORT", "5433"),
+		name:     envOr("TEST_DB_NAME", "wagering_test"),
+		user:     envOr("TEST_DB_USER", "wagering"),
+		password: envOr("TEST_DB_PASSWORD", "local-dev-only"),
 	}
 
-	db, err := sql.Open("pgx", cfg.DSN())
+	db, err := sql.Open("pgx", cfg.dsn())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "opening %s: %v\n", cfg.Redacted(), err)
+		fmt.Fprintf(os.Stderr, "opening %s: %v\n", cfg.label(), err)
 		os.Exit(1)
 	}
 	if err := db.PingContext(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "cannot reach %s: %v\nrun `make up-test` first\n", cfg.Redacted(), err)
+		fmt.Fprintf(os.Stderr, "cannot reach %s: %v\nrun `make up-test` first\n", cfg.label(), err)
 		os.Exit(1)
 	}
 	if err := Migrate(ctx, db); err != nil {
@@ -70,7 +93,7 @@ func TestMain(m *testing.M) {
 	}
 	_ = db.Close()
 
-	testPool, err = NewPool(ctx, cfg, PoolConfig{MaxConns: 8})
+	testPool, err = NewPool(ctx, PoolConfig{DSN: cfg.dsn(), SafeLabel: cfg.label(), MaxConns: 8})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pool: %v\n", err)
 		os.Exit(1)
