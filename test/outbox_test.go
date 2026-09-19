@@ -99,6 +99,32 @@ func eventCluster(t *testing.T) (cluster, string) {
 	return c, eventsQueue
 }
 
+// eventsForWallet keeps the events belonging to one wallet.
+//
+// Every test in this package shares one database, and a publisher claims any
+// row that is due -- including rows an earlier test's cluster left behind. That
+// is exactly right in production, where one outbox has one destination, and it
+// means a test here can only assert about its own aggregates.
+//
+// All four events carry the wallet in their payload, which is what makes the
+// filter possible.
+func eventsForWallet(t *testing.T, walletID string, events []eventEnvelope) []eventEnvelope {
+	t.Helper()
+	var mine []eventEnvelope
+	for _, event := range events {
+		var payload struct {
+			WalletID string `json:"walletId"`
+		}
+		if err := json.Unmarshal(event.Data, &payload); err != nil {
+			t.Fatalf("decoding %s: %v", event.EventType, err)
+		}
+		if payload.WalletID == walletID {
+			mine = append(mine, event)
+		}
+	}
+	return mine
+}
+
 func typesOf(events []eventEnvelope) map[string]int {
 	counts := map[string]int{}
 	for _, event := range events {
@@ -127,7 +153,7 @@ func TestOperationsPublishTheirEvents(t *testing.T) {
 		t.Fatalf("the loss answered %d: %s", status, body)
 	}
 
-	events := drainEvents(t, eventsQueue, 30*time.Second)
+	events := eventsForWallet(t, walletID, drainEvents(t, eventsQueue, 30*time.Second))
 	counts := typesOf(events)
 
 	// Opening, bet and loss all completed: three.
@@ -161,7 +187,7 @@ func TestARejectionPublishesARejectedEvent(t *testing.T) {
 		t.Fatalf("the bet answered %d, want 422", status)
 	}
 
-	events := drainEvents(t, eventsQueue, 30*time.Second)
+	events := eventsForWallet(t, walletID, drainEvents(t, eventsQueue, 30*time.Second))
 	counts := typesOf(events)
 	if counts["WagerTransactionRejected"] != 1 {
 		t.Fatalf("got %v, want one rejection", counts)
@@ -176,6 +202,9 @@ func TestARejectionPublishesARejectedEvent(t *testing.T) {
 	}
 	if err := json.Unmarshal(events[0].Data, &payload); err != nil {
 		t.Fatal(err)
+	}
+	if events[0].EventType != "WagerTransactionRejected" {
+		t.Fatalf("the only event is a %s", events[0].EventType)
 	}
 	if payload.FailureCode != "INSUFFICIENT_FUNDS" {
 		t.Errorf("failure code = %q", payload.FailureCode)
@@ -200,7 +229,7 @@ func TestEveryEventIsPublishedExactlyOnceWithThreePublishers(t *testing.T) {
 		}
 	}
 
-	events := drainEvents(t, eventsQueue, 60*time.Second)
+	events := eventsForWallet(t, walletID, drainEvents(t, eventsQueue, 60*time.Second))
 
 	// The opening's two, plus two for each bet.
 	want := 2 + bets*2
@@ -264,7 +293,7 @@ func TestEventsSurviveABrokerThatWasNotThereYet(t *testing.T) {
 	second := startClusterWith(t, overrides)
 	_ = second
 
-	events := drainEvents(t, eventsQueue, 45*time.Second)
+	events := eventsForWallet(t, walletID, drainEvents(t, eventsQueue, 45*time.Second))
 	counts := typesOf(events)
 	if counts["WagerTransactionProcessed"] != 2 || counts["WalletBalanceChanged"] != 2 {
 		t.Fatalf("got %v, want the opening's and the bet's events", counts)

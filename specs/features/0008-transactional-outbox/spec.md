@@ -35,6 +35,21 @@ A varredura de ponto flutuante barrou um **teste meu**: comparar
 float. Corrigi decodificando numa struct tipada. Versão lida através de float é
 versão que pode arredondar.
 
+## O que só a suíte inteira mostrou
+
+Os quatro cenários passavam rodando sozinhos e **um falhou quando a suíte
+inteira rodou**: esperava 3 eventos de conclusão e viu 7.
+
+Não era bug do registro de saída. Todos os testes do pacote compartilham um
+banco, e o publisher reivindica **qualquer** linha devida — inclusive as que o
+cluster de um teste anterior deixou para trás. Isso é o comportamento certo em
+produção, onde um registro de saída tem um destino; o que estava errado era o
+teste afirmar sobre agregados que não são dele.
+
+As asserções passaram a filtrar pela carteira do próprio teste. Vale anotar o
+formato da falha: **rodar um subconjunto com `-run` escondeu o problema**, e foi
+a execução completa que o revelou.
+
 ## Como se prova
 
 ```sh
