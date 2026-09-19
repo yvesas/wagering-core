@@ -79,12 +79,20 @@ var HTTPModule = fx.Module("http",
 )
 
 // QueueModule provisions the queues and builds the consumers.
-var QueueModule = fx.Module("queue", fx.Provide(newQueueClient))
+var QueueModule = fx.Module("queue",
+	fx.Provide(
+		newQueueClient,
+		newEventPublisher,
+		publisherPolicy,
+		newPublisher,
+	),
+)
 
 // WorkersModule runs the background work.
 var WorkersModule = fx.Module("workers",
 	fx.Invoke(runReferenceWorker),
 	fx.Invoke(runConsumers),
+	fx.Invoke(runPublisher),
 )
 
 // Module is the whole application.
@@ -121,6 +129,65 @@ func newQueueClient(appCfg AppConfig, logger *slog.Logger) (*sqsadapter.Client, 
 		slog.String("queue", appCfg.QueueName),
 		slog.String("deadLetter", appCfg.QueueDLQName))
 	return client, nil
+}
+
+// newEventPublisher provisions the destination for outgoing events.
+func newEventPublisher(appCfg AppConfig, logger *slog.Logger) (app.EventPublisher, error) {
+	publisher, err := sqsadapter.NewEventPublisher(context.Background(), sqsadapter.Config{
+		Endpoint:    appCfg.QueueEndpoint,
+		Region:      appCfg.QueueRegion,
+		AccessKeyID: appCfg.AWSAccessKeyID,
+		SecretKey:   appCfg.AWSSecretAccessKey,
+	}, appCfg.QueueEventsName)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info("events destination ready", slog.String("queue", appCfg.QueueEventsName))
+	return publisher, nil
+}
+
+func publisherPolicy(cfg AppConfig) app.PublisherPolicy {
+	return app.PublisherPolicy{
+		BatchSize:      cfg.PublisherBatchSize,
+		Interval:       cfg.PublisherInterval,
+		BaseBackoff:    cfg.PublisherBaseBackoff,
+		PublishTimeout: cfg.PublisherTimeout,
+	}
+}
+
+func newPublisher(uow app.UnitOfWork, publisher app.EventPublisher, clock app.Clock, policy app.PublisherPolicy, logger *slog.Logger) *app.Publisher {
+	return app.NewPublisher(uow, publisher, clock, policy, logger)
+}
+
+// runPublisher starts the outbox publisher and stops it before the pool closes.
+//
+// Nothing waits for it on the way out beyond the deadline: an event that was
+// not published is still in the outbox, and whoever runs next picks it up. That
+// is the property the outbox buys.
+func runPublisher(lc fx.Lifecycle, publisher *app.Publisher, logger *slog.Logger) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	lc.Append(fx.Hook{
+		OnStart: func(context.Context) error {
+			go func() {
+				defer close(done)
+				publisher.Run(ctx)
+			}()
+			logger.Info("outbox publisher started")
+			return nil
+		},
+		OnStop: func(stopCtx context.Context) error {
+			cancel()
+			select {
+			case <-done:
+				logger.Info("outbox publisher stopped")
+			case <-stopCtx.Done():
+				logger.Warn("outbox publisher did not stop in time")
+			}
+			return nil
+		},
+	})
 }
 
 // runConsumers starts the queue consumers and drains them on stop.
