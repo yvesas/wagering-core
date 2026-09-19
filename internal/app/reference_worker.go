@@ -85,6 +85,7 @@ type ReferenceWorker struct {
 	clock  Clock
 	policy ReferencePolicy
 	logger *slog.Logger
+	events eventRecorder
 }
 
 func NewReferenceWorker(uow UnitOfWork, ids IDGenerator, clock Clock, policy ReferencePolicy, logger *slog.Logger) *ReferenceWorker {
@@ -94,6 +95,7 @@ func NewReferenceWorker(uow UnitOfWork, ids IDGenerator, clock Clock, policy Ref
 		clock:  clock,
 		policy: policy.normalised(),
 		logger: logger,
+		events: newEventRecorder(ids, clock),
 	}
 }
 
@@ -176,13 +178,19 @@ func (w *ReferenceWorker) handleOne(ctx context.Context) (bool, error) {
 
 		switch decision.outcome {
 		case resolveApply:
-			applied, _, err := applyReversal(ctx, repos, w.ids, pending, decision, wallet, now)
+			applied, movement, err := applyReversal(ctx, repos, w.ids, pending, decision, wallet, now)
 			if err != nil {
 				var de *domain.Error
 				if !errors.As(err, &de) {
 					return err
 				}
 				return w.reject(ctx, repos, pending, de.Code, now)
+			}
+			// A reversal that waited and one that applied straight away end in
+			// the same state and report the same events. That is the point of
+			// sharing applyReversal.
+			if err := w.emit(ctx, repos, applied, movement.Wallet, movement.Entry, true); err != nil {
+				return err
 			}
 			w.logger.Info("pending reference resolved",
 				slog.String("transactionId", applied.ID().String()),
@@ -218,5 +226,17 @@ func (w *ReferenceWorker) reject(ctx context.Context, repos Repositories, pendin
 		slog.String("transactionId", rejected.ID().String()),
 		slog.String("failureCode", string(code)),
 		slog.Int("attempts", rejected.ReferenceAttempts()))
-	return repos.Transactions().Update(ctx, rejected)
+
+	if err := repos.Transactions().Update(ctx, rejected); err != nil {
+		return err
+	}
+	return w.emit(ctx, repos, rejected, domain.Wallet{}, domain.LedgerEntry{}, false)
+}
+
+func (w *ReferenceWorker) emit(ctx context.Context, repos Repositories, transaction domain.WagerTransaction, wallet domain.Wallet, entry domain.LedgerEntry, moved bool) error {
+	events, err := eventsForOutcome(transaction, wallet, entry, moved)
+	if err != nil {
+		return err
+	}
+	return w.events.record(ctx, repos, events...)
 }

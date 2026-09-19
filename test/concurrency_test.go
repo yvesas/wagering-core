@@ -119,6 +119,7 @@ func startClusterWith(t *testing.T, overrides map[string]string) cluster {
 		// Short polling in tests: the production ten seconds would make every
 		// shutdown assertion wait for it.
 		"QUEUE_WAIT_TIME=1s",
+		"PUBLISHER_INTERVAL=200ms",
 	)
 
 	for key, value := range overrides {

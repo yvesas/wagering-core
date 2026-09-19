@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/yvesas/wagering-core/internal/app"
 )
 
 // Routes builds the mux.
@@ -72,7 +74,11 @@ func withCorrelationID(next http.Handler) http.Handler {
 			id = uuid.NewString()
 		}
 		w.Header().Set(CorrelationIDHeader, id)
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), correlationIDKey{}, id)))
+
+		// The id goes into the app layer's context too, so an event recorded by
+		// this request can be traced back to it.
+		ctx := context.WithValue(r.Context(), correlationIDKey{}, id)
+		next.ServeHTTP(w, r.WithContext(app.WithCorrelationID(ctx, id)))
 	})
 }
 

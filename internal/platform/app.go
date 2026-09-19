@@ -35,6 +35,12 @@ type AppConfig struct {
 	QueueConsumers         int
 	AWSAccessKeyID         string
 	AWSSecretAccessKey     string
+
+	QueueEventsName      string
+	PublisherBatchSize   int
+	PublisherInterval    time.Duration
+	PublisherBaseBackoff time.Duration
+	PublisherTimeout     time.Duration
 }
 
 // AppConfigFromEnv reads the process settings, falling back to values that make
@@ -85,6 +91,20 @@ func AppConfigFromEnv() (AppConfig, error) {
 		return AppConfig{}, err
 	}
 	if cfg.QueueConsumers, err = intEnv("QUEUE_CONSUMERS", 2); err != nil {
+		return AppConfig{}, err
+	}
+
+	cfg.QueueEventsName = envOr("QUEUE_EVENTS_NAME", "wager-events.fifo")
+	if cfg.PublisherBatchSize, err = intEnv("PUBLISHER_BATCH_SIZE", 50); err != nil {
+		return AppConfig{}, err
+	}
+	if cfg.PublisherInterval, err = durationEnv("PUBLISHER_INTERVAL", 500*time.Millisecond); err != nil {
+		return AppConfig{}, err
+	}
+	if cfg.PublisherBaseBackoff, err = durationEnv("PUBLISHER_BASE_BACKOFF", time.Second); err != nil {
+		return AppConfig{}, err
+	}
+	if cfg.PublisherTimeout, err = durationEnv("PUBLISHER_TIMEOUT", 10*time.Second); err != nil {
 		return AppConfig{}, err
 	}
 	return cfg, nil

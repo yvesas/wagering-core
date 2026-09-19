@@ -89,12 +89,15 @@ func (g *fakeIDs) NewLedgerEntryID(context.Context) (domain.LedgerEntryID, error
 	return domain.ParseLedgerEntryID(s)
 }
 
+func (g *fakeIDs) NewEventID(context.Context) (string, error) { return g.next() }
+
 // memoryStore records what a committed transaction wrote.
 type memoryStore struct {
 	wallets      []domain.Wallet
 	transactions []domain.WagerTransaction
 	entries      []domain.LedgerEntry
 	inbox        []InboxMessage
+	outbox       []OutboxRecord
 
 	failOnInsertWallet error
 	failOnInsertTx     error
@@ -108,6 +111,7 @@ func (s *memoryStore) clone() *memoryStore {
 		transactions:       append([]domain.WagerTransaction(nil), s.transactions...),
 		entries:            append([]domain.LedgerEntry(nil), s.entries...),
 		inbox:              append([]InboxMessage(nil), s.inbox...),
+		outbox:             append([]OutboxRecord(nil), s.outbox...),
 		failOnInsertWallet: s.failOnInsertWallet,
 		failOnInsertTx:     s.failOnInsertTx,
 	}
@@ -131,6 +135,7 @@ func (u *memoryUnitOfWork) Do(ctx context.Context, fn func(context.Context, Repo
 	u.store.transactions = staged.transactions
 	u.store.entries = staged.entries
 	u.store.inbox = staged.inbox
+	u.store.outbox = staged.outbox
 	u.store.commits++
 	return nil
 }
@@ -148,6 +153,56 @@ func (r *memoryRepositories) Wallets() WalletRepository           { return &memo
 func (r *memoryRepositories) Ledger() LedgerRepository            { return &memoryLedger{store: r.store} }
 func (r *memoryRepositories) Transactions() TransactionRepository { return &memoryTx{store: r.store} }
 func (r *memoryRepositories) Inbox() InboxRepository              { return &memoryInbox{store: r.store} }
+func (r *memoryRepositories) Outbox() OutboxRepository            { return &memoryOutbox{store: r.store} }
+
+// memoryOutbox keeps the events a committed transaction produced.
+type memoryOutbox struct{ store *memoryStore }
+
+func (m *memoryOutbox) Append(_ context.Context, record OutboxRecord) error {
+	for _, existing := range m.store.outbox {
+		if existing.EventID == record.EventID {
+			return NewConflict("outbox_events_pkey")
+		}
+	}
+	m.store.outbox = append(m.store.outbox, record)
+	return nil
+}
+
+func (m *memoryOutbox) ClaimDue(_ context.Context, now time.Time, limit int) ([]OutboxRecord, error) {
+	var due []OutboxRecord
+	for _, record := range m.store.outbox {
+		if record.Published() || record.NextAttemptAt.After(now) {
+			continue
+		}
+		due = append(due, record)
+		if len(due) == limit {
+			break
+		}
+	}
+	return due, nil
+}
+
+func (m *memoryOutbox) MarkPublished(_ context.Context, eventID string, at time.Time) error {
+	for i, record := range m.store.outbox {
+		if record.EventID == eventID {
+			m.store.outbox[i].PublishedAt = at
+			return nil
+		}
+	}
+	return ErrNotFound
+}
+
+func (m *memoryOutbox) Reschedule(_ context.Context, eventID string, nextAttemptAt time.Time, cause string) error {
+	for i, record := range m.store.outbox {
+		if record.EventID == eventID {
+			m.store.outbox[i].Attempts++
+			m.store.outbox[i].NextAttemptAt = nextAttemptAt
+			m.store.outbox[i].LastError = cause
+			return nil
+		}
+	}
+	return ErrNotFound
+}
 
 // memoryInbox enforces the same uniqueness the schema does, because that
 // constraint is the deduplication: a fake without it would let a test pass
@@ -366,8 +421,13 @@ func TestOpenWalletWithBalance(t *testing.T) {
 	if store.commits != 1 {
 		t.Errorf("committed %d times, want once: all three writes are one commit", store.commits)
 	}
-	if got := len(ids.minted); got != 3 {
-		t.Errorf("minted %d ids, want 3 (wallet, transaction, entry)", got)
+	// Wallet, transaction, entry, and one id for each of the two events: the
+	// opening completed, and the balance changed.
+	if got := len(ids.minted); got != 5 {
+		t.Errorf("minted %d ids, want 5", got)
+	}
+	if len(store.outbox) != 2 {
+		t.Fatalf("recorded %d events, want 2", len(store.outbox))
 	}
 
 	if store.transactions[0].Kind() != domain.KindOpening {
@@ -400,10 +460,14 @@ func TestOpenWalletAtZeroWritesOnlyTheWallet(t *testing.T) {
 	if wallet.Version() != 1 {
 		t.Errorf("version = %d, want 1", wallet.Version())
 	}
-	// Only the wallet id. Minting the other two would burn identities on
-	// records that are never written.
+	// Only the wallet id. Minting the others would burn identities on records
+	// that are never written -- and an opening of nothing produces no events,
+	// because nothing happened to report.
 	if got := len(ids.minted); got != 1 {
 		t.Errorf("minted %d ids, want 1", got)
+	}
+	if len(store.outbox) != 0 {
+		t.Errorf("an opening of nothing produced %d events", len(store.outbox))
 	}
 }
 

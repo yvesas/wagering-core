@@ -179,7 +179,8 @@ func (r *repositories) Ledger() app.LedgerRepository  { return &ledgerRepository
 func (r *repositories) Transactions() app.TransactionRepository {
 	return &transactionRepository{q: r.q}
 }
-func (r *repositories) Inbox() app.InboxRepository { return &inboxRepository{q: r.q} }
+func (r *repositories) Inbox() app.InboxRepository   { return &inboxRepository{q: r.q} }
+func (r *repositories) Outbox() app.OutboxRepository { return &outboxRepository{q: r.q} }
 
 // queries is read-only access straight to the pool.
 type queries struct {
