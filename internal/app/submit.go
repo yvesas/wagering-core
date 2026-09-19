@@ -41,10 +41,18 @@ type SubmitTransaction struct {
 	ids     IDGenerator
 	clock   Clock
 	waiting ReferencePolicy
+	events  eventRecorder
 }
 
 func NewSubmitTransaction(uow UnitOfWork, queries Queries, ids IDGenerator, clock Clock, waiting ReferencePolicy) *SubmitTransaction {
-	return &SubmitTransaction{uow: uow, queries: queries, ids: ids, clock: clock, waiting: waiting.normalised()}
+	return &SubmitTransaction{
+		uow:     uow,
+		queries: queries,
+		ids:     ids,
+		clock:   clock,
+		waiting: waiting.normalised(),
+		events:  newEventRecorder(ids, clock),
+	}
 }
 
 // Execute opens a transaction and applies the operation.
@@ -266,6 +274,9 @@ func (uc *SubmitTransaction) apply(ctx context.Context, repos Repositories, p pa
 		if err := repos.Transactions().Insert(ctx, rejected); err != nil {
 			return SubmitResult{}, err
 		}
+		if err := uc.emit(ctx, repos, rejected, wallet, domain.LedgerEntry{}, false); err != nil {
+			return SubmitResult{}, err
+		}
 		// The rejection *is* the result, and a resend has to read it rather
 		// than try again.
 		return SubmitResult{Transaction: rejected, Balance: wallet.Balance()}, nil
@@ -281,7 +292,12 @@ func (uc *SubmitTransaction) apply(ctx context.Context, repos Repositories, p pa
 
 	if !moved {
 		// LOSS moves nothing: no ledger entry, no version bump, and the balance
-		// reported is the one the wallet already had.
+		// reported is the one the wallet already had. It still reports that the
+		// operation finished -- that is why "processed" and "balance changed"
+		// are two events and not one.
+		if err := uc.emit(ctx, repos, applied, wallet, domain.LedgerEntry{}, false); err != nil {
+			return SubmitResult{}, err
+		}
 		return SubmitResult{Transaction: applied, Balance: wallet.Balance()}, nil
 	}
 
@@ -291,7 +307,19 @@ func (uc *SubmitTransaction) apply(ctx context.Context, repos Repositories, p pa
 	if err := repos.Ledger().Append(ctx, movement.Entry); err != nil {
 		return SubmitResult{}, err
 	}
+	if err := uc.emit(ctx, repos, applied, movement.Wallet, movement.Entry, true); err != nil {
+		return SubmitResult{}, err
+	}
 	return SubmitResult{Transaction: applied, Balance: movement.Wallet.Balance()}, nil
+}
+
+// emit records the events an outcome produces, in the same transaction.
+func (uc *SubmitTransaction) emit(ctx context.Context, repos Repositories, transaction domain.WagerTransaction, wallet domain.Wallet, entry domain.LedgerEntry, moved bool) error {
+	events, err := eventsForOutcome(transaction, wallet, entry, moved)
+	if err != nil {
+		return err
+	}
+	return uc.events.record(ctx, repos, events...)
 }
 
 func balanceAfter(wallet domain.Wallet, movement domain.Movement, moved bool) domain.Money {
@@ -373,6 +401,9 @@ func (uc *SubmitTransaction) resolve(
 		if err := repos.Transactions().Insert(ctx, parked); err != nil {
 			return SubmitResult{}, err
 		}
+		if err := uc.emit(ctx, repos, parked, wallet, domain.LedgerEntry{}, false); err != nil {
+			return SubmitResult{}, err
+		}
 		return SubmitResult{Transaction: parked, Balance: wallet.Balance()}, nil
 
 	case resolveReject:
@@ -386,6 +417,9 @@ func (uc *SubmitTransaction) resolve(
 			return SubmitResult{}, err
 		}
 		return uc.recordReversalRejection(ctx, repos, reversal, de.Code, wallet, at)
+	}
+	if err := uc.emit(ctx, repos, applied, movement.Wallet, movement.Entry, true); err != nil {
+		return SubmitResult{}, err
 	}
 
 	return SubmitResult{Transaction: applied, Balance: movement.Wallet.Balance()}, nil
@@ -404,6 +438,9 @@ func (uc *SubmitTransaction) recordReversalRejection(
 		return SubmitResult{}, err
 	}
 	if err := repos.Transactions().Insert(ctx, rejected); err != nil {
+		return SubmitResult{}, err
+	}
+	if err := uc.emit(ctx, repos, rejected, wallet, domain.LedgerEntry{}, false); err != nil {
 		return SubmitResult{}, err
 	}
 	return SubmitResult{Transaction: rejected, Balance: wallet.Balance()}, nil

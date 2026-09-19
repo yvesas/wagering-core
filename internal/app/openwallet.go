@@ -21,16 +21,17 @@ type OpenWalletCommand struct {
 // OpenWallet creates a wallet and, when it opens with money, the opening credit
 // that goes with it.
 type OpenWallet struct {
-	uow   UnitOfWork
-	ids   IDGenerator
-	clock Clock
+	uow    UnitOfWork
+	ids    IDGenerator
+	clock  Clock
+	events eventRecorder
 }
 
 // NewOpenWallet takes plain constructor arguments, which is what lets the use
 // case be built by fx.Provide and by three lines in a test alike. See
 // docs/adr/0004-fx-only-at-the-edge.md.
 func NewOpenWallet(uow UnitOfWork, ids IDGenerator, clock Clock) *OpenWallet {
-	return &OpenWallet{uow: uow, ids: ids, clock: clock}
+	return &OpenWallet{uow: uow, ids: ids, clock: clock, events: newEventRecorder(ids, clock)}
 }
 
 // Execute opens the wallet.
@@ -114,7 +115,19 @@ func (uc *OpenWallet) Execute(ctx context.Context, cmd OpenWalletCommand) (domai
 				return err
 			}
 		}
-		return nil
+
+		// The events go in the same commit as the wallet and its entry. A
+		// wallet opened with money reports both that the opening completed and
+		// that the balance changed; one opened at zero reports neither,
+		// because neither happened.
+		if !openingTx.IsInitialised() {
+			return nil
+		}
+		events, err := eventsForOutcome(openingTx, opening.Wallet, opening.Entries[0], true)
+		if err != nil {
+			return err
+		}
+		return uc.events.record(ctx, repos, events...)
 	})
 	if err != nil {
 		return domain.Wallet{}, err

@@ -252,7 +252,11 @@ func (c *Consumer) apply(ctx context.Context, envelope Envelope, cmd SubmitComma
 	// The shutdown path cancels the context, and the work already in hand still
 	// has to finish. WithoutCancel gives it a context that will not be pulled
 	// out from under a commit; the caller's shutdown deadline is what bounds it.
-	err = c.uow.Do(context.WithoutCancel(ctx), func(ctx context.Context, repos Repositories) error {
+	// The message id is what caused this work, so events recorded here can be
+	// traced back to the delivery that produced them.
+	work := WithCorrelationID(context.WithoutCancel(ctx), envelope.MessageID)
+
+	err = c.uow.Do(work, func(ctx context.Context, repos Repositories) error {
 		now := c.clock.Now()
 
 		claimErr := repos.Inbox().Claim(ctx, InboxMessage{

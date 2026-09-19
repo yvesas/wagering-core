@@ -421,8 +421,13 @@ func TestOpenWalletWithBalance(t *testing.T) {
 	if store.commits != 1 {
 		t.Errorf("committed %d times, want once: all three writes are one commit", store.commits)
 	}
-	if got := len(ids.minted); got != 3 {
-		t.Errorf("minted %d ids, want 3 (wallet, transaction, entry)", got)
+	// Wallet, transaction, entry, and one id for each of the two events: the
+	// opening completed, and the balance changed.
+	if got := len(ids.minted); got != 5 {
+		t.Errorf("minted %d ids, want 5", got)
+	}
+	if len(store.outbox) != 2 {
+		t.Fatalf("recorded %d events, want 2", len(store.outbox))
 	}
 
 	if store.transactions[0].Kind() != domain.KindOpening {
@@ -455,10 +460,14 @@ func TestOpenWalletAtZeroWritesOnlyTheWallet(t *testing.T) {
 	if wallet.Version() != 1 {
 		t.Errorf("version = %d, want 1", wallet.Version())
 	}
-	// Only the wallet id. Minting the other two would burn identities on
-	// records that are never written.
+	// Only the wallet id. Minting the others would burn identities on records
+	// that are never written -- and an opening of nothing produces no events,
+	// because nothing happened to report.
 	if got := len(ids.minted); got != 1 {
 		t.Errorf("minted %d ids, want 1", got)
+	}
+	if len(store.outbox) != 0 {
+		t.Errorf("an opening of nothing produced %d events", len(store.outbox))
 	}
 }
 
