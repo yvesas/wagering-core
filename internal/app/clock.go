@@ -29,4 +29,8 @@ type IDGenerator interface {
 	NewWalletID(ctx context.Context) (domain.WalletID, error)
 	NewTransactionID(ctx context.Context) (domain.TransactionID, error)
 	NewLedgerEntryID(ctx context.Context) (domain.LedgerEntryID, error)
+
+	// NewEventID is the identity an event keeps forever, including across a
+	// republish.
+	NewEventID(ctx context.Context) (string, error)
 }

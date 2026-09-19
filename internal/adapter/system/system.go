@@ -62,6 +62,13 @@ func (g IDGenerator) NewLedgerEntryID(ctx context.Context) (domain.LedgerEntryID
 	return domain.ParseLedgerEntryID(s)
 }
 
+// NewEventID mints the identity an event keeps forever, including across a
+// republish. Same UUIDv7 as everything else: time-ordered, so a listing of
+// events reads in the order the facts happened.
+func (g IDGenerator) NewEventID(ctx context.Context) (string, error) {
+	return g.next(ctx)
+}
+
 func (IDGenerator) next(ctx context.Context) (string, error) {
 	// Generation reads the entropy pool, which can fail. A caller that is
 	// already being cancelled should not wait on it.
