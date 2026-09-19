@@ -4,9 +4,9 @@
 > pretendido vive em `specs/project/PROJECT.md` e no `spec.md` de cada feature.
 >
 > **Estado atual:** domínio, persistência, os cinco tipos de operação, duas
-> portas de entrada — HTTP e fila — com registro de entrada, idempotência
-> persistente, coordenação por carteira e dois workers, compostos por Fx. Não há
-> publicação por registro de saída, autenticação nem reconciliação.
+> portas de entrada, registro de entrada, registro de saída com publicação,
+> idempotência persistente, coordenação por carteira e três workers, compostos
+> por Fx. Não há autenticação nem reconciliação.
 
 ## O que existe
 
@@ -333,9 +333,37 @@ O `MessageGroupId` é a **carteira**, que é a mesma granularidade da coordenaç
 (ADR 0007). Agrupar por provedor serializaria todas as carteiras dele atrás de
 uma só.
 
+## O registro de saída
+
+Banco e broker não compartilham transação. Publicar antes do commit anuncia um
+fato que pode não ter acontecido; publicar depois, fora da transação, perde o
+evento se o processo morrer no meio. Gravar o evento **na mesma transação** e
+publicar depois é a única forma sem nenhuma das duas falhas.
+
+**O evento nasce no domínio.** Tipo e versão são fixados pelo construtor — um
+chamador que pudesse escolhê-los publicaria um payload v1 rotulado v2, e o
+consumidor o leria errado sem nada aqui perceber.
+
+**O payload é um retrato imutável.** Montá-lo na hora de publicar leria o estado
+**atual**: um `WalletBalanceChanged` publicado três segundos depois anunciaria o
+saldo de agora, e como o atraso varia, o mesmo evento diria coisas diferentes
+dependendo de quando o worker acordou.
+
+**O lock da linha é o lease.** O publisher reserva com `FOR UPDATE SKIP LOCKED`,
+publica dentro da transação e marca no mesmo commit. Isso segura um lock durante
+uma chamada de rede — e é o ponto: um publisher que trava ou morre libera as
+linhas no instante em que o Postgres percebe, sem campo de expiração para
+calibrar e sem relógio para sincronizar entre máquinas. O custo é contido por
+lote pequeno e **timeout de publicação explícito**.
+
+**`LOSS` produz `WagerTransactionProcessed` e não produz `WalletBalanceChanged`.**
+É o caso que separa "a operação terminou" de "o dinheiro mudou".
+
+Contrato completo em `docs/events.md`; decisões em `docs/adr/0010-outbox.md`.
+
 ## O que os testes provam
 
-487 casos no total. `-race` limpo, inclusive nos cenários multi-processo.
+536 casos no total. `-race` limpo, inclusive nos cenários multi-processo.
 
 Os cenários de concorrência rodam em **três processos independentes**, não em
 goroutines. Goroutines compartilham pool e memória: provam que o código é seguro
@@ -370,6 +398,10 @@ Três guardas valem menção porque protegem invariante:
   janela do broker não filtrar: um débito.
 - **Um envelope ilegível não trava o consumidor** — numa fila FIFO, retentar
   bloquearia tudo atrás dele.
+- **Trinta apostas com três publishers** disputando o mesmo registro de saída:
+  cada evento sai exatamente uma vez.
+- **Um broker que não estava lá** não impede a operação: o dinheiro se move, os
+  eventos ficam guardados, e saem quando alguém volta a publicar.
 - Toda cena termina conferindo saldo armazenado contra créditos menos débitos,
   em unidades mínimas: usar float na verificação faria ela depender do que está
   verificando.
@@ -402,5 +434,5 @@ créditos menos débitos.
 
 ## O que ainda não existe
 
-Publicação por registro de saída, autenticação OIDC, métricas e reconciliação. A ordem em que entram está no plano de ação, fora do
+Autenticação OIDC, métricas e reconciliação. A ordem em que entram está no plano de ação, fora do
 repositório.

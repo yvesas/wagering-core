@@ -26,9 +26,10 @@ repositório, na pasta de controle ao lado.
 
 | 6 | Reversões e resolução de referência | pronta |
 | 7 | Consumo por fila, com registro de entrada | pronta |
+| 8 | Publicação por registro de saída | pronta |
 
-Fases 8 a 10 — publicação por registro de saída, autenticação, observabilidade —
-estão especificadas em `specs/project/REQUIREMENTS.md`.
+Fases 9 e 10 — autenticação, observabilidade e reconciliação — estão
+especificadas em `specs/project/REQUIREMENTS.md`.
 
 ## Pré-requisitos
 
@@ -76,6 +77,7 @@ versionado com valores locais de exemplo; `.env` nunca é.
 | O quê | Onde |
 |---|---|
 | Contrato da API | `docs/api.md` |
+| Contrato dos eventos | `docs/events.md` |
 | Visão, princípios e stack | `specs/project/PROJECT.md` |
 | Requisitos com ID rastreável | `specs/project/REQUIREMENTS.md` |
 | O que está sendo construído agora | `specs/features/NNNN-slug/spec.md` |

@@ -12,6 +12,10 @@
 | 2026-09-18 | Requisitos com ID versionados em `specs/project/REQUIREMENTS.md` | Precisam viajar no clone para o `spec.md` de cada feature poder citá-los. Ficariam órfãos fora do repositório. |
 | 2026-09-18 | Plano, ordem das tarefas e andamento fora do repositório | Plano e verdade no mesmo arquivo envelhecem juntos e ninguém confia em nenhum dos dois. O repositório guarda o produto; a pasta de controle, a execução. |
 | 2026-09-18 | Convenções de Go no `CLAUDE.md` do projeto | A rule `code-style.md` do baseline é de TypeScript e não se edita dentro de um projeto — a próxima instalação sobrescreve. O `CLAUDE.md` é o arquivo que o instalador nunca toca. |
+| 2026-09-19 | O evento nasce no domínio (F8.1) | ADR 0010. Tipo e versão fixados pelo construtor: quem pudesse escolhê-los publicaria um v1 rotulado v2. |
+| 2026-09-19 | Payload é retrato imutável, não referência | Montado na publicação leria o estado atual, e o mesmo evento diria coisas diferentes conforme o atraso. |
+| 2026-09-19 | O lock da linha é o lease do publisher | Um lease com expiração exige timeout calibrado e relógio confiável entre máquinas; o lock morre com a conexão de graça. |
+| 2026-09-19 | `eventId` cunhado na gravação, estável na republicação | É o que permite ao consumidor deduplicar o que a entrega at-least-once entrega duas vezes. |
 | 2026-09-18 | Registro de entrada e domínio no mesmo commit (F7.1) | ADR 0009. Obrigou `ExecuteIn`, a forma do caso de uso que roda na transação de quem chama. As duas portas compartilham o mesmo código. |
 | 2026-09-18 | Identidade é o `messageId` do envelope | O id do SQS muda em redrive, o que faria reentrega parecer mensagem nova. |
 | 2026-09-18 | Commit primeiro, apagar depois | Apagar antes perde a operação; apagar depois pode duplicar, e é isso que o registro de entrada absorve. |
