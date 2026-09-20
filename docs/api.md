@@ -282,6 +282,33 @@ O que entra no hash do payload e o que fica de fora está em
 O mesmo corpo, pelo par que identifica a operação para o provedor — os
 identificadores que ele já tem.
 
+## `POST /wallets/{walletId}/reconciliation`
+
+Reconstrói o saldo a partir do ledger e compara com o armazenado, **sem alterar
+nada**. Restrito ao serviço interno (`wallets:manage`).
+
+```json
+{
+  "walletId": "01a0bf0c-b606-77c8-ad11-ae976207576f",
+  "consistent": false,
+  "storedBalance":  { "amount": "40.00",  "currency": "BRL" },
+  "rebuiltBalance": { "amount": "100.00", "currency": "BRL" },
+  "difference":     { "amount": "-60.00", "currency": "BRL" },
+  "entries": 3,
+  "walletVersion": 4,
+  "checkedAt": "2026-09-20T12:00:00.000Z"
+}
+```
+
+**Divergência responde 200**, com `consistent: false`. Quem chamou perguntou se
+os dois batem, e responder "não batem" é o endpoint funcionando — um não-2xx
+faria um monitor tratar verificação bem-sucedida como requisição quebrada.
+
+É `POST` embora não mude nada: lê todo lançamento que a carteira já teve, e
+`GET` convidaria cache, prefetch e retry-por-timeout. `GET` responde 405.
+
+Detalhe em [`observability.md`](observability.md).
+
 ## `GET /health/live`
 
 **200** `{"status":"ok"}`. Não toca em dependência nenhuma. Ligar o banco aqui

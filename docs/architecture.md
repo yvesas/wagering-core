@@ -22,6 +22,8 @@ internal/domain/            o núcleo, sem import de infraestrutura
 internal/app/               as portas, declaradas por quem consome
 ├── ports.go                leitores, repositórios, Repositories, UnitOfWork
 ├── identity.go             quem está chamando, e o que pode fazer
+├── metrics.go              o que se mede, sem saber com o quê
+├── reconcile.go            o saldo conferido contra o próprio ledger
 └── errors.go               as falhas que um adaptador pode reportar
 
 internal/adapter/postgres/  a implementação
@@ -36,6 +38,8 @@ internal/adapter/http/      a borda de entrada
 ├── wallet.go               handlers e DTOs
 ├── health.go               liveness e readiness
 └── errors.go               erro → status, tabela exaustiva
+
+internal/adapter/metrics/   o recorder Prometheus, atrás das portas do app
 
 internal/adapter/oidc/      verificação de token contra o IdP externo
 ├── oidc.go                 discovery, claims e a lista de algoritmos aceitos
@@ -460,7 +464,27 @@ E um que enuncia a propriedade central: **`TestBalanceAlwaysMatchesTheLedger`**
 percorre uma sequência de movimentações e confere o saldo final contra a soma de
 créditos menos débitos.
 
+## Observabilidade e reconciliação
+
+Métrica é **porta**: `internal/app` declara quatro interfaces estreitas e o
+adaptador Prometheus satisfaz as quatro. Nada acima dele sabe o que é um label —
+e nenhuma delas aceita id de carteira, provedor ou valor, porque label sem
+limite é como um backend de métrica é derrubado pela instrumentação que existia
+para observá-lo. O label de rota sai da tabela de rotas, não do caminho.
+
+A exposição fica numa **porta separada** (`APP_METRICS_ADDR`, padrão `:9090`),
+sem credencial e não publicada para fora: um scraper não é um provedor.
+
+A reconciliação reconstrói o saldo a partir do ledger e compara, sem escrever
+nada. As duas leituras acontecem numa transação `REPEATABLE READ READ ONLY`,
+através da porta `Snapshot` — separada do unit of work porque o padrão do
+PostgreSQL dá um snapshot **por statement**, e duas leituras cercando o commit
+de outra pessoa produziriam uma divergência que nunca existiu.
+
+Decisões em `docs/adr/0012-observability-and-reconciliation.md`; séries, linhas
+de log e o que fazer com uma divergência em `docs/observability.md`.
+
 ## O que ainda não existe
 
-Métricas e reconciliação. A ordem em que entram está no plano de ação, fora do
-repositório.
+Reconciliação em lote, tracing distribuído e testes de carga. A ordem em que
+entram está no plano de ação, fora do repositório.

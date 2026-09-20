@@ -28,9 +28,7 @@ repositório, na pasta de controle ao lado.
 | 7 | Consumo por fila, com registro de entrada | pronta |
 | 8 | Publicação por registro de saída | pronta |
 | 9 | Autenticação OIDC e isolamento entre provedores | pronta |
-
-A fase 10 — observabilidade e reconciliação — está especificada em
-`specs/project/REQUIREMENTS.md`.
+| 10 | Observabilidade, métricas e reconciliação | pronta |
 
 ## Pré-requisitos
 
@@ -93,6 +91,7 @@ versionado com valores locais de exemplo; `.env` nunca é.
 | Contrato da API | `docs/api.md` |
 | Contrato dos eventos | `docs/events.md` |
 | Autenticação e isolamento | `docs/security.md` |
+| Métricas, logs e reconciliação | `docs/observability.md` |
 | Visão, princípios e stack | `specs/project/PROJECT.md` |
 | Requisitos com ID rastreável | `specs/project/REQUIREMENTS.md` |
 | O que está sendo construído agora | `specs/features/NNNN-slug/spec.md` |
