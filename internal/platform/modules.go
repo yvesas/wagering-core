@@ -14,6 +14,7 @@ import (
 	"go.uber.org/fx"
 
 	httpadapter "github.com/yvesas/wagering-core/internal/adapter/http"
+	"github.com/yvesas/wagering-core/internal/adapter/oidc"
 	"github.com/yvesas/wagering-core/internal/adapter/postgres"
 	sqsadapter "github.com/yvesas/wagering-core/internal/adapter/sqs"
 	"github.com/yvesas/wagering-core/internal/adapter/system"
@@ -30,6 +31,7 @@ var ConfigModule = fx.Module("config",
 	fx.Provide(
 		AppConfigFromEnv,
 		DatabaseConfigFromEnv,
+		OIDCConfigFromEnv,
 		NewLogger,
 	),
 )
@@ -68,6 +70,7 @@ var UseCasesModule = fx.Module("usecases",
 // HTTPModule builds the server and runs it.
 var HTTPModule = fx.Module("http",
 	fx.Provide(
+		newAuthenticator,
 		newWalletHandler,
 		newTransactionHandler,
 		newHealthHandler,
@@ -105,6 +108,32 @@ var Module = fx.Options(
 	HTTPModule,
 	WorkersModule,
 )
+
+// newAuthenticator reaches the identity provider and builds the edge's guard.
+//
+// Discovery happens here, at start-up, so an issuer that cannot be reached
+// fails the boot. The alternative is a process that reports itself healthy and
+// answers 401 to everyone, which is a far harder thing to read at three in the
+// morning than a container that refuses to start.
+func newAuthenticator(cfg OIDCConfig, logger *slog.Logger) (*httpadapter.Authenticator, error) {
+	verifier, err := oidc.New(context.Background(), oidc.Config{
+		IssuerURL:     cfg.IssuerURL,
+		Audience:      cfg.Audience,
+		ProviderClaim: cfg.ProviderClaim,
+		CacheTTL:      cfg.CacheTTL,
+		Leeway:        cfg.Leeway,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Info("identity provider ready",
+		slog.String("issuer", cfg.IssuerURL),
+		slog.String("audience", cfg.Audience),
+		slog.String("providerClaim", cfg.ProviderClaim))
+
+	return httpadapter.NewAuthenticator(verifier), nil
+}
 
 // newQueueClient reaches the broker and provisions the queues.
 //
