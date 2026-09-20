@@ -4,7 +4,7 @@ GO ?= go
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup fmt fmt-check vet domain-check app-check test race cover check up up-test down logs test-integration test-concurrency
+.PHONY: help setup fmt fmt-check vet domain-check app-check test race cover check up up-test down logs token test-integration test-concurrency
 
 help: ## List the available targets
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -66,3 +66,17 @@ down: ## Stop the local dependencies and drop the volumes
 
 logs: ## Follow the compose logs
 	docker compose logs -f
+
+# CLIENT picks which local credential to mint: provider-acme, provider-rival or
+# platform. See docs/security.md for what each one may do.
+CLIENT ?= provider-acme
+OIDC_PORT ?= 8081
+
+token: ## Print an access token from the local Keycloak (CLIENT=provider-acme)
+	@curl -sf -X POST \
+		"http://localhost:$(OIDC_PORT)/realms/wagering/protocol/openid-connect/token" \
+		-d grant_type=client_credentials \
+		-d client_id=$(CLIENT) \
+		-d client_secret=local-dev-only \
+	| sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p' \
+	| grep . || { echo "no token: is \`make up\` running, and is $(CLIENT) a client of the realm?" >&2; exit 1; }
