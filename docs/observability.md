@@ -49,6 +49,11 @@ Um teste lê a linha de volta e falha se um identificador sumir ou se um valor
 aparecer. Os dois requisitos puxam para lados opostos e por isso são o mesmo
 teste.
 
+**A exceção, e ela é deliberada:** a linha de divergência de reconciliação
+carrega os dois saldos e a diferença. É a única que carrega, e sem eles a linha
+não diria nada — o que se registra ali é um agregado de uma carteira num
+incidente, não o payload de uma requisição. `REQ-OBS-002` fala do segundo.
+
 ## Métricas
 
 `GET /metrics` em **porta separada** (`APP_METRICS_ADDR`, padrão `:9090`), sem
