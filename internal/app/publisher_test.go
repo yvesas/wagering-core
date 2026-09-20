@@ -55,7 +55,7 @@ func TestThePublisherSendsAndMarks(t *testing.T) {
 	f := newSubmitFixture(t, "100.00")
 	broker := &fakePublisher{}
 
-	sent, err := f.publisher(broker).RunOnce(context.Background())
+	sent, err := f.publisher(broker).RunOnce(callerContext())
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestThePublisherSendsAndMarks(t *testing.T) {
 	}
 
 	// A second pass has nothing to do: the marks are what stop it republishing.
-	again, err := f.publisher(broker).RunOnce(context.Background())
+	again, err := f.publisher(broker).RunOnce(callerContext())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestAFailedPublishIsRescheduledAndRetried(t *testing.T) {
 	broker := &fakePublisher{failUntil: 2} // both of the opening's events fail once
 
 	publisher := f.publisher(broker)
-	if _, err := publisher.RunOnce(context.Background()); err != nil {
+	if _, err := publisher.RunOnce(callerContext()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
@@ -107,7 +107,7 @@ func TestAFailedPublishIsRescheduledAndRetried(t *testing.T) {
 
 	// Past the backoff, the broker is healthy and both go out.
 	f.clock.advance(time.Second)
-	if _, err := publisher.RunOnce(context.Background()); err != nil {
+	if _, err := publisher.RunOnce(callerContext()); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(broker.sentIDs()); got != 2 {
@@ -123,7 +123,7 @@ func TestOneBadEventDoesNotHoldUpTheBatch(t *testing.T) {
 	// written after it.
 	broker := &fakePublisher{failUntil: 1}
 
-	if _, err := f.publisher(broker).RunOnce(context.Background()); err != nil {
+	if _, err := f.publisher(broker).RunOnce(callerContext()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	if got := len(broker.sentIDs()); got != 1 {
@@ -150,13 +150,13 @@ func TestRepublishingKeepsTheEventID(t *testing.T) {
 	// A publisher that died between sending and marking: the event went out,
 	// and the mark did not land.
 	broker := &fakePublisher{}
-	if err := broker.Publish(context.Background(), f.store.outbox[0]); err != nil {
+	if err := broker.Publish(callerContext(), f.store.outbox[0]); err != nil {
 		t.Fatal(err)
 	}
 	firstID := broker.sentIDs()[0]
 
 	// The next pass finds it still unpublished and sends it again.
-	if _, err := f.publisher(broker).RunOnce(context.Background()); err != nil {
+	if _, err := f.publisher(broker).RunOnce(callerContext()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -176,14 +176,14 @@ func TestThePublisherPublishesInWrittenOrder(t *testing.T) {
 	f := newSubmitFixture(t, "1000.00")
 
 	for i, amount := range []string{"10.00", "20.00", "30.00"} {
-		if _, err := f.submit.Execute(context.Background(),
+		if _, err := f.submit.Execute(callerContext(),
 			f.command("BET", amount, "tx-"+string(rune('a'+i)))); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	broker := &fakePublisher{}
-	if _, err := f.publisher(broker).RunOnce(context.Background()); err != nil {
+	if _, err := f.publisher(broker).RunOnce(callerContext()); err != nil {
 		t.Fatal(err)
 	}
 

@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"errors"
 	"testing"
 	"time"
@@ -25,6 +24,10 @@ type submitFixture struct {
 	store  *memoryStore
 	wallet domain.Wallet
 	clock  *movableClock
+
+	// ids is the fixture's own generator. A second one would start over and
+	// mint identifiers this store already holds.
+	ids *fakeIDs
 }
 
 // newSubmitFixture opens a wallet through the real use case, so what the submit
@@ -37,7 +40,7 @@ func newSubmitFixture(t *testing.T, balance string) submitFixture {
 	uow := &memoryUnitOfWork{store: store}
 	queries := &memoryQueries{store: store}
 
-	wallet, err := NewOpenWallet(uow, ids, clock).Execute(context.Background(), OpenWalletCommand{
+	wallet, err := NewOpenWallet(uow, ids, clock).Execute(callerContext(), OpenWalletCommand{
 		PlayerID: "player-1",
 		Amount:   balance,
 		Currency: "BRL",
@@ -51,6 +54,7 @@ func newSubmitFixture(t *testing.T, balance string) submitFixture {
 		store:  store,
 		wallet: wallet,
 		clock:  clock,
+		ids:    ids,
 	}
 }
 
@@ -71,7 +75,7 @@ func (f submitFixture) command(kind, amount, external string) SubmitCommand {
 
 func (f submitFixture) storedWallet(t *testing.T) domain.Wallet {
 	t.Helper()
-	w, err := (&memoryQueries{store: f.store}).Wallets().FindByID(context.Background(), f.wallet.ID())
+	w, err := (&memoryQueries{store: f.store}).Wallets().FindByID(callerContext(), f.wallet.ID())
 	if err != nil {
 		t.Fatalf("reading the wallet back: %v", err)
 	}
@@ -82,7 +86,7 @@ func TestSubmitBetDebits(t *testing.T) {
 	t.Parallel()
 	f := newSubmitFixture(t, "100.00")
 
-	result, err := f.submit.Execute(context.Background(), f.command("BET", "25.00", "tx-1"))
+	result, err := f.submit.Execute(callerContext(), f.command("BET", "25.00", "tx-1"))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -109,7 +113,7 @@ func TestSubmitWinCredits(t *testing.T) {
 	t.Parallel()
 	f := newSubmitFixture(t, "100.00")
 
-	result, err := f.submit.Execute(context.Background(), f.command("WIN", "50.00", "tx-1"))
+	result, err := f.submit.Execute(callerContext(), f.command("WIN", "50.00", "tx-1"))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -123,7 +127,7 @@ func TestSubmitLossMovesNothing(t *testing.T) {
 	f := newSubmitFixture(t, "100.00")
 	before := f.storedWallet(t)
 
-	result, err := f.submit.Execute(context.Background(), f.command("LOSS", "0.00", "tx-1"))
+	result, err := f.submit.Execute(callerContext(), f.command("LOSS", "0.00", "tx-1"))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -148,7 +152,7 @@ func TestSubmitRejectsNonZeroLoss(t *testing.T) {
 	t.Parallel()
 	f := newSubmitFixture(t, "100.00")
 
-	_, err := f.submit.Execute(context.Background(), f.command("LOSS", "25.00", "tx-1"))
+	_, err := f.submit.Execute(callerContext(), f.command("LOSS", "25.00", "tx-1"))
 	if !errors.Is(err, domain.ErrInvalidAmountForKind) {
 		t.Fatalf("error = %v, want ErrInvalidAmountForKind", err)
 	}
@@ -158,7 +162,7 @@ func TestInsufficientFundsIsARecordedRejection(t *testing.T) {
 	t.Parallel()
 	f := newSubmitFixture(t, "100.00")
 
-	result, err := f.submit.Execute(context.Background(), f.command("BET", "100.01", "tx-1"))
+	result, err := f.submit.Execute(callerContext(), f.command("BET", "100.01", "tx-1"))
 	// Not an error: the refusal is the result, and it is committed so a resend
 	// reads it instead of trying again.
 	if err != nil {
@@ -183,12 +187,12 @@ func TestReplayReturnsTheStoredResult(t *testing.T) {
 	f := newSubmitFixture(t, "100.00")
 	cmd := f.command("BET", "25.00", "tx-1")
 
-	first, err := f.submit.Execute(context.Background(), cmd)
+	first, err := f.submit.Execute(callerContext(), cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	second, err := f.submit.Execute(context.Background(), cmd)
+	second, err := f.submit.Execute(callerContext(), cmd)
 	if err != nil {
 		t.Fatalf("the resend failed: %v", err)
 	}
@@ -211,18 +215,18 @@ func TestReplayReturnsTheOriginalBalanceNotTheCurrentOne(t *testing.T) {
 	f := newSubmitFixture(t, "100.00")
 	bet := f.command("BET", "25.00", "tx-1")
 
-	if _, err := f.submit.Execute(context.Background(), bet); err != nil {
+	if _, err := f.submit.Execute(callerContext(), bet); err != nil {
 		t.Fatal(err)
 	}
 	// Something else moves the wallet in between.
-	if _, err := f.submit.Execute(context.Background(), f.command("WIN", "500.00", "tx-2")); err != nil {
+	if _, err := f.submit.Execute(callerContext(), f.command("WIN", "500.00", "tx-2")); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.storedWallet(t).Balance().String(); got != "575.00" {
 		t.Fatalf("the wallet is at %s, the test needs it to have moved", got)
 	}
 
-	replay, err := f.submit.Execute(context.Background(), bet)
+	replay, err := f.submit.Execute(callerContext(), bet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,11 +242,11 @@ func TestReplayOfARejectionIsStillARejection(t *testing.T) {
 	f := newSubmitFixture(t, "100.00")
 	cmd := f.command("BET", "500.00", "tx-1")
 
-	if _, err := f.submit.Execute(context.Background(), cmd); err != nil {
+	if _, err := f.submit.Execute(callerContext(), cmd); err != nil {
 		t.Fatal(err)
 	}
 
-	replay, err := f.submit.Execute(context.Background(), cmd)
+	replay, err := f.submit.Execute(callerContext(), cmd)
 	if err != nil {
 		t.Fatalf("the resend failed: %v", err)
 	}
@@ -261,7 +265,7 @@ func TestSameKeyWithDifferentContentConflicts(t *testing.T) {
 	f := newSubmitFixture(t, "1000.00")
 
 	first := f.command("BET", "25.00", "tx-1")
-	if _, err := f.submit.Execute(context.Background(), first); err != nil {
+	if _, err := f.submit.Execute(callerContext(), first); err != nil {
 		t.Fatal(err)
 	}
 
@@ -269,7 +273,7 @@ func TestSameKeyWithDifferentContentConflicts(t *testing.T) {
 	second := f.command("BET", "999.00", "tx-2")
 	second.IdempotencyKey = first.IdempotencyKey
 
-	_, err := f.submit.Execute(context.Background(), second)
+	_, err := f.submit.Execute(callerContext(), second)
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("error = %v, want ErrConflict", err)
 	}
@@ -283,7 +287,7 @@ func TestSameOperationUnderAnotherKeyConflicts(t *testing.T) {
 	f := newSubmitFixture(t, "1000.00")
 
 	first := f.command("BET", "25.00", "tx-1")
-	if _, err := f.submit.Execute(context.Background(), first); err != nil {
+	if _, err := f.submit.Execute(callerContext(), first); err != nil {
 		t.Fatal(err)
 	}
 
@@ -292,7 +296,7 @@ func TestSameOperationUnderAnotherKeyConflicts(t *testing.T) {
 	again := f.command("BET", "25.00", "tx-1")
 	again.IdempotencyKey = "provider-a:a-brand-new-key"
 
-	_, err := f.submit.Execute(context.Background(), again)
+	_, err := f.submit.Execute(callerContext(), again)
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("error = %v, want ErrConflict", err)
 	}
@@ -305,7 +309,7 @@ func TestSameExternalIDWithDifferentContentConflicts(t *testing.T) {
 	t.Parallel()
 	f := newSubmitFixture(t, "1000.00")
 
-	if _, err := f.submit.Execute(context.Background(), f.command("BET", "25.00", "tx-1")); err != nil {
+	if _, err := f.submit.Execute(callerContext(), f.command("BET", "25.00", "tx-1")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -313,7 +317,7 @@ func TestSameExternalIDWithDifferentContentConflicts(t *testing.T) {
 	// an identity that is supposed to be fixed.
 	changed := f.command("BET", "26.00", "tx-1")
 
-	_, err := f.submit.Execute(context.Background(), changed)
+	_, err := f.submit.Execute(callerContext(), changed)
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("error = %v, want ErrConflict", err)
 	}
@@ -324,7 +328,7 @@ func TestIdempotencyDoesNotDependOnProcessMemory(t *testing.T) {
 	f := newSubmitFixture(t, "100.00")
 	cmd := f.command("BET", "25.00", "tx-1")
 
-	if _, err := f.submit.Execute(context.Background(), cmd); err != nil {
+	if _, err := f.submit.Execute(callerContext(), cmd); err != nil {
 		t.Fatal(err)
 	}
 
@@ -339,7 +343,7 @@ func TestIdempotencyDoesNotDependOnProcessMemory(t *testing.T) {
 		testReferencePolicy,
 	)
 
-	replay, err := restarted.Execute(context.Background(), cmd)
+	replay, err := restarted.Execute(callerContext(), cmd)
 	if err != nil {
 		t.Fatalf("after a restart: %v", err)
 	}
@@ -358,7 +362,7 @@ func TestSubmitRejectsAWalletThatBelongsToSomeoneElse(t *testing.T) {
 	cmd := f.command("BET", "25.00", "tx-1")
 	cmd.PlayerID = "a-different-player"
 
-	_, err := f.submit.Execute(context.Background(), cmd)
+	_, err := f.submit.Execute(callerContext(), cmd)
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("error = %v, want ErrInvalidInput", err)
 	}
@@ -374,7 +378,7 @@ func TestSubmitRejectsAnUnknownWallet(t *testing.T) {
 	cmd := f.command("BET", "25.00", "tx-1")
 	cmd.WalletID = "no-such-wallet"
 
-	if _, err := f.submit.Execute(context.Background(), cmd); !errors.Is(err, ErrNotFound) {
+	if _, err := f.submit.Execute(callerContext(), cmd); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("error = %v, want ErrNotFound", err)
 	}
 }
@@ -399,7 +403,7 @@ func TestSubmitRejectsBadInput(t *testing.T) {
 			cmd := f.command("BET", "25.00", "tx-1")
 			mutate(&cmd)
 
-			if _, err := f.submit.Execute(context.Background(), cmd); err == nil {
+			if _, err := f.submit.Execute(callerContext(), cmd); err == nil {
 				t.Fatal("want a rejection")
 			}
 			if len(f.store.transactions) != 1 {
@@ -419,7 +423,7 @@ func TestConcurrentDuplicatesProduceOneMovement(t *testing.T) {
 	// copies both find nothing -- the insert has to be what refuses the second.
 	f.store.transactions = nil
 
-	first, err := f.submit.Execute(context.Background(), cmd)
+	first, err := f.submit.Execute(callerContext(), cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,7 +431,7 @@ func TestConcurrentDuplicatesProduceOneMovement(t *testing.T) {
 		t.Error("the first submission reported a replay")
 	}
 
-	second, err := f.submit.Execute(context.Background(), cmd)
+	second, err := f.submit.Execute(callerContext(), cmd)
 	if err != nil {
 		t.Fatalf("the racing duplicate failed instead of replaying: %v", err)
 	}

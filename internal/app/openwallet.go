@@ -41,6 +41,15 @@ func NewOpenWallet(uow UnitOfWork, ids IDGenerator, clock Clock) *OpenWallet {
 // and is committed with the wallet, so there is no window in which it is
 // accepted but not yet applied, and nothing for another instance to resume.
 func (uc *OpenWallet) Execute(ctx context.Context, cmd OpenWalletCommand) (domain.Wallet, error) {
+	// Opening a wallet mints the initial balance, which is the one operation in
+	// this service that creates money rather than moving it. It is the internal
+	// service's alone -- REQ-SEC-004 -- and the schema says the same thing from
+	// the other side: wager_transactions_external_shape refuses an OPENING that
+	// carries a provider.
+	if _, err := caller(ctx, ScopeWallets); err != nil {
+		return domain.Wallet{}, err
+	}
+
 	playerID, err := domain.ParsePlayerID(cmd.PlayerID)
 	if err != nil {
 		return domain.Wallet{}, err

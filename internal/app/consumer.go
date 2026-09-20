@@ -212,7 +212,22 @@ func (c *Consumer) handle(ctx context.Context, message QueueMessage) {
 		return
 	}
 
-	result, decided, err := c.apply(ctx, envelope, cmd)
+	// The use case refuses a call with no identity, and rightly so: on this port
+	// the caller is the envelope, and an envelope that cannot name a provider
+	// names nobody. It is dropped with the malformed ones rather than released,
+	// because redelivering it would fail in exactly the same way until the
+	// dead-letter queue took it.
+	identity, err := c.identity(envelope)
+	if err != nil {
+		c.logger.Error("discarding a message that names no provider",
+			slog.String("consumer", c.cfg.Name),
+			slog.String("messageId", envelope.MessageID),
+			slog.String("error", err.Error()))
+		c.finish(ctx, message, outcomeDelete)
+		return
+	}
+
+	result, decided, err := c.apply(ctx, envelope, cmd, identity)
 	if err != nil {
 		// Transient: hand it straight back rather than leaving it invisible for
 		// the whole visibility timeout.
@@ -238,7 +253,7 @@ func (c *Consumer) handle(ctx context.Context, message QueueMessage) {
 //
 // The second return says whether this delivery did the work, as opposed to
 // finding it already done.
-func (c *Consumer) apply(ctx context.Context, envelope Envelope, cmd SubmitCommand) (SubmitResult, bool, error) {
+func (c *Consumer) apply(ctx context.Context, envelope Envelope, cmd SubmitCommand, identity Identity) (SubmitResult, bool, error) {
 	hash, err := cmd.PayloadHash()
 	if err != nil {
 		return SubmitResult{}, false, err
@@ -254,7 +269,8 @@ func (c *Consumer) apply(ctx context.Context, envelope Envelope, cmd SubmitComma
 	// out from under a commit; the caller's shutdown deadline is what bounds it.
 	// The message id is what caused this work, so events recorded here can be
 	// traced back to the delivery that produced them.
-	work := WithCorrelationID(context.WithoutCancel(ctx), envelope.MessageID)
+	work := WithIdentity(
+		WithCorrelationID(context.WithoutCancel(ctx), envelope.MessageID), identity)
 
 	err = c.uow.Do(work, func(ctx context.Context, repos Repositories) error {
 		now := c.clock.Now()
@@ -301,6 +317,32 @@ func (c *Consumer) apply(ctx context.Context, envelope Envelope, cmd SubmitComma
 		return SubmitResult{}, false, err
 	}
 	return result, worked, nil
+}
+
+// identity is who a delivery acts as.
+//
+// It comes from the envelope, and the trust anchor is the broker: the queue's
+// access policy decides who may put a message on it, and a producer that is
+// allowed to write can name any provider in the body. That is REQ-SEC-005 read
+// honestly -- the credential check happened at the broker, not here -- and it
+// is worth stating plainly rather than implying a token was verified.
+//
+// What does *not* change is everything after this point. The same use case runs
+// with the same rules: the provider named here is the one the operation is
+// recorded under, it cannot reach another provider's operations, and the domain
+// still refuses whatever it would refuse over HTTP.
+func (c *Consumer) identity(envelope Envelope) (Identity, error) {
+	return NewIdentity(IdentityParams{
+		// The consumer, not the provider: the subject says which credential
+		// this came through, and here that is the queue itself.
+		Subject:    "queue:" + c.cfg.Name,
+		ProviderID: envelope.Data.ProviderID,
+
+		// Submitting only. A delivery never reads back someone's operations and
+		// never opens a wallet, so granting either would widen the queue's
+		// reach past what any message can ask for.
+		Scopes: []string{string(ScopeSubmit)},
+	})
 }
 
 // alreadySeen decides what a repeat delivery means.

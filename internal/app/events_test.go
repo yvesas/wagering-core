@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"testing"
 
 	"github.com/yvesas/wagering-core/internal/domain"
@@ -11,7 +10,7 @@ func TestEventsAreWrittenInTheSameCommitAsTheFact(t *testing.T) {
 	t.Parallel()
 	f := newSubmitFixture(t, "100.00")
 
-	if _, err := f.submit.Execute(context.Background(), f.command("BET", "25.00", "tx-1")); err != nil {
+	if _, err := f.submit.Execute(callerContext(), f.command("BET", "25.00", "tx-1")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -33,7 +32,7 @@ func TestARejectedOperationDoesNotAnnounceABalanceChange(t *testing.T) {
 	f := newSubmitFixture(t, "100.00")
 	before := len(f.store.outbox)
 
-	if _, err := f.submit.Execute(context.Background(), f.command("BET", "500.00", "tx-1")); err != nil {
+	if _, err := f.submit.Execute(callerContext(), f.command("BET", "500.00", "tx-1")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -48,7 +47,7 @@ func TestALossAnnouncesCompletionButNoBalanceChange(t *testing.T) {
 	f := newSubmitFixture(t, "100.00")
 	before := len(f.store.outbox)
 
-	if _, err := f.submit.Execute(context.Background(), f.command("LOSS", "0.00", "tx-1")); err != nil {
+	if _, err := f.submit.Execute(callerContext(), f.command("LOSS", "0.00", "tx-1")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -68,7 +67,7 @@ func TestAWaitingReversalAnnouncesItself(t *testing.T) {
 
 	cmd := f.command("REFUND", "25.00", "refund-1")
 	cmd.ReferenceExternalID = "a-bet-that-has-not-arrived"
-	if _, err := f.submit.Execute(context.Background(), cmd); err != nil {
+	if _, err := f.submit.Execute(callerContext(), cmd); err != nil {
 		t.Fatal(err)
 	}
 
@@ -82,7 +81,7 @@ func TestEventsCarryTheCorrelationOfWhatCausedThem(t *testing.T) {
 	t.Parallel()
 	f := newSubmitFixture(t, "100.00")
 
-	ctx := WithCorrelationID(context.Background(), "request-42")
+	ctx := WithCorrelationID(callerContext(), "request-42")
 	if _, err := f.submit.Execute(ctx, f.command("BET", "25.00", "tx-1")); err != nil {
 		t.Fatal(err)
 	}

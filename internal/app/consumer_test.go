@@ -110,7 +110,7 @@ func TestConsumerAppliesAnOperation(t *testing.T) {
 	f := newConsumerFixture(t, "100.00")
 	f.queue.push("receipt-1", f.envelopeFor("msg-1", "BET", "25.00", "tx-1"))
 
-	if _, err := f.consumer.RunOnce(context.Background()); err != nil {
+	if _, err := f.consumer.RunOnce(callerContext()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
@@ -133,7 +133,7 @@ func TestTheInboxAbsorbsARepeatedDelivery(t *testing.T) {
 	f.queue.push("receipt-2", body)
 	f.queue.push("receipt-3", body)
 
-	if _, err := f.consumer.RunOnce(context.Background()); err != nil {
+	if _, err := f.consumer.RunOnce(callerContext()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
@@ -157,7 +157,7 @@ func TestTheSameOperationFromBothPathsMovesMoneyOnce(t *testing.T) {
 	f := newConsumerFixture(t, "100.00")
 
 	// HTTP first.
-	if _, err := f.submit.Execute(context.Background(), f.command("BET", "25.00", "tx-1")); err != nil {
+	if _, err := f.submit.Execute(callerContext(), f.command("BET", "25.00", "tx-1")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -167,7 +167,7 @@ func TestTheSameOperationFromBothPathsMovesMoneyOnce(t *testing.T) {
 	// different jobs.
 	f.queue.push("receipt-1", f.envelopeFor("msg-brand-new", "BET", "25.00", "tx-1"))
 
-	if _, err := f.consumer.RunOnce(context.Background()); err != nil {
+	if _, err := f.consumer.RunOnce(callerContext()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
@@ -184,7 +184,7 @@ func TestABusinessRejectionDeletesTheMessage(t *testing.T) {
 	f := newConsumerFixture(t, "100.00")
 	f.queue.push("receipt-1", f.envelopeFor("msg-1", "BET", "500.00", "tx-1"))
 
-	if _, err := f.consumer.RunOnce(context.Background()); err != nil {
+	if _, err := f.consumer.RunOnce(callerContext()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
@@ -219,7 +219,7 @@ func TestAMalformedEnvelopeIsDiscarded(t *testing.T) {
 			f := newConsumerFixture(t, "100.00")
 			f.queue.push("receipt-1", body)
 
-			if _, err := f.consumer.RunOnce(context.Background()); err != nil {
+			if _, err := f.consumer.RunOnce(callerContext()); err != nil {
 				t.Fatalf("RunOnce: %v", err)
 			}
 
@@ -246,7 +246,7 @@ func TestAnUnusableCommandIsRecordedRatherThanRetriedForever(t *testing.T) {
 	body = replaceOnce(body, `"currency":"BRL"`, `"currency":"brl"`)
 	f.queue.push("receipt-1", body)
 
-	if _, err := f.consumer.RunOnce(context.Background()); err != nil {
+	if _, err := f.consumer.RunOnce(callerContext()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
@@ -277,7 +277,7 @@ func TestATransientFailureReleasesTheMessage(t *testing.T) {
 	f := consumerFixture{submitFixture: base, queue: queue, consumer: consumer}
 	queue.push("receipt-1", f.envelopeFor("msg-1", "BET", "25.00", "tx-1"))
 
-	if _, err := consumer.RunOnce(context.Background()); err != nil {
+	if _, err := consumer.RunOnce(callerContext()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 
@@ -296,7 +296,7 @@ func TestARepeatedMessageIdWithDifferentContentIsRefused(t *testing.T) {
 	f := newConsumerFixture(t, "100.00")
 
 	f.queue.push("receipt-1", f.envelopeFor("msg-1", "BET", "25.00", "tx-1"))
-	if _, err := f.consumer.RunOnce(context.Background()); err != nil {
+	if _, err := f.consumer.RunOnce(callerContext()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -304,7 +304,7 @@ func TestARepeatedMessageIdWithDifferentContentIsRefused(t *testing.T) {
 	// identifier; applying it would apply an operation under someone else's
 	// identity.
 	f.queue.push("receipt-2", f.envelopeFor("msg-1", "BET", "40.00", "tx-2"))
-	if _, err := f.consumer.RunOnce(context.Background()); err != nil {
+	if _, err := f.consumer.RunOnce(callerContext()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -332,7 +332,7 @@ func TestAClaimedButUncompletedMessageIsRetried(t *testing.T) {
 	})
 
 	f.queue.push("receipt-1", f.envelopeFor("msg-1", "BET", "25.00", "tx-1"))
-	if _, err := f.consumer.RunOnce(context.Background()); err != nil {
+	if _, err := f.consumer.RunOnce(callerContext()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -345,7 +345,7 @@ func TestRunStopsWhenTheContextIsCancelled(t *testing.T) {
 	t.Parallel()
 	f := newConsumerFixture(t, "100.00")
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(callerContext())
 	done := make(chan struct{})
 	go func() { defer close(done); f.consumer.Run(ctx) }()
 
@@ -365,7 +365,7 @@ func TestAMessageInHandIsFinishedEvenWhileShuttingDown(t *testing.T) {
 	// Already cancelled: this is the shutdown case. What the consumer is
 	// holding still has to be handled and committed, or the message comes back
 	// for no reason and the work is done twice.
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(callerContext())
 	cancel()
 
 	if _, err := f.consumer.RunOnce(ctx); err != nil {

@@ -5,11 +5,24 @@ import (
 	"fmt"
 )
 
-// The failures an adapter is allowed to report. Nothing above this layer ever
-// inspects a driver error code, and no *pgconn.PgError travels past the
-// adapter boundary -- translating at the edge is what keeps the use cases from
-// being written in the vocabulary of one database.
+// The failures this layer reports, and the only ones an adapter is allowed to
+// raise. Nothing above here ever inspects a driver error code, and no
+// *pgconn.PgError travels past the adapter boundary -- translating at the edge
+// is what keeps the use cases from being written in the vocabulary of one
+// database, or of one identity provider.
 var (
+	// ErrUnauthenticated means the caller did not prove who it is. It is not
+	// "you may not": it is "we do not know you", and the two are different
+	// answers -- one is fixed by presenting a credential, the other never is.
+	ErrUnauthenticated = errors.New("unauthenticated")
+
+	// ErrForbidden means the caller is known and the operation is not theirs.
+	//
+	// It is deliberately *not* the answer to "may I see someone else's
+	// operation": that one is ErrNotFound, because a 403 on a read confirms the
+	// row exists. See identity.go.
+	ErrForbidden = errors.New("forbidden")
+
 	// ErrNotFound means the row is not there. It is not an error on its own:
 	// most callers decide what a missing wallet means.
 	ErrNotFound = errors.New("not found")

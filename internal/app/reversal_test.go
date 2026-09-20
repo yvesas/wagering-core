@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -36,14 +35,14 @@ func TestRefundReturnsABet(t *testing.T) {
 	t.Parallel()
 	f := newSubmitFixture(t, "100.00")
 
-	if _, err := f.submit.Execute(context.Background(), f.command("BET", "25.00", "bet-1")); err != nil {
+	if _, err := f.submit.Execute(callerContext(), f.command("BET", "25.00", "bet-1")); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.storedWallet(t).Balance().String(); got != "75.00" {
 		t.Fatalf("after the bet the balance is %s", got)
 	}
 
-	result, err := f.submit.Execute(context.Background(),
+	result, err := f.submit.Execute(callerContext(),
 		f.reversalOf("REFUND", "25.00", "refund-1", "bet-1"))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -80,12 +79,12 @@ func TestRollbackAppliesTheOppositeMovement(t *testing.T) {
 			t.Parallel()
 			f := newSubmitFixture(t, "100.00")
 
-			if _, err := f.submit.Execute(context.Background(),
+			if _, err := f.submit.Execute(callerContext(),
 				f.command(tc.originKind, tc.originStake, "origin-1")); err != nil {
 				t.Fatal(err)
 			}
 
-			result, err := f.submit.Execute(context.Background(),
+			result, err := f.submit.Execute(callerContext(),
 				f.reversalOf("ROLLBACK", tc.originStake, "rollback-1", "origin-1"))
 			if err != nil {
 				t.Fatalf("Execute: %v", err)
@@ -105,10 +104,10 @@ func TestTheSameDebitIsNotReturnedTwice(t *testing.T) {
 	t.Parallel()
 	f := newSubmitFixture(t, "100.00")
 
-	if _, err := f.submit.Execute(context.Background(), f.command("BET", "25.00", "bet-1")); err != nil {
+	if _, err := f.submit.Execute(callerContext(), f.command("BET", "25.00", "bet-1")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.submit.Execute(context.Background(),
+	if _, err := f.submit.Execute(callerContext(),
 		f.reversalOf("REFUND", "25.00", "refund-1", "bet-1")); err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +118,7 @@ func TestTheSameDebitIsNotReturnedTwice(t *testing.T) {
 	// A rollback of the same bet is a different *type* of reversal, which is
 	// exactly why "no two of the same type" is not enough: this would hand back
 	// the same 25.00 a second time.
-	result, err := f.submit.Execute(context.Background(),
+	result, err := f.submit.Execute(callerContext(),
 		f.reversalOf("ROLLBACK", "25.00", "rollback-1", "bet-1"))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -142,15 +141,15 @@ func TestReversingARefundIsNotReversingItsBetAgain(t *testing.T) {
 	// BET -> REFUND -> ROLLBACK(of the refund). Each operation is reversed
 	// once, and the balance ends where a bet that was never refunded would
 	// leave it. This is the chain the rule has to keep allowing.
-	if _, err := f.submit.Execute(context.Background(), f.command("BET", "25.00", "bet-1")); err != nil {
+	if _, err := f.submit.Execute(callerContext(), f.command("BET", "25.00", "bet-1")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.submit.Execute(context.Background(),
+	if _, err := f.submit.Execute(callerContext(),
 		f.reversalOf("REFUND", "25.00", "refund-1", "bet-1")); err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := f.submit.Execute(context.Background(),
+	result, err := f.submit.Execute(callerContext(),
 		f.reversalOf("ROLLBACK", "25.00", "rollback-1", "refund-1"))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -237,7 +236,7 @@ func TestReversalRejections(t *testing.T) {
 			tc.setUp(t, f)
 			before := f.storedWallet(t).Balance().String()
 
-			result, err := f.submit.Execute(context.Background(), tc.reversal(f))
+			result, err := f.submit.Execute(callerContext(), tc.reversal(f))
 			if err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
@@ -267,7 +266,7 @@ func TestAReversalThatDoesNotFitHasItsOwnCode(t *testing.T) {
 		t.Fatalf("balance is %s", got)
 	}
 
-	result, err := f.submit.Execute(context.Background(),
+	result, err := f.submit.Execute(callerContext(),
 		f.reversalOf("ROLLBACK", "50.00", "rollback-1", "win-1"))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -293,7 +292,7 @@ func TestAReversalThatArrivesFirstWaits(t *testing.T) {
 
 	// The refund overtakes the bet it undoes. At-least-once delivery has no
 	// order, so this is expected rather than exceptional.
-	result, err := f.submit.Execute(context.Background(),
+	result, err := f.submit.Execute(callerContext(),
 		f.reversalOf("REFUND", "25.00", "refund-1", "bet-1"))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -317,7 +316,7 @@ func TestTheWorkerResolvesAWaitingReversal(t *testing.T) {
 	f := newSubmitFixture(t, "100.00")
 
 	// It waits...
-	waiting, err := f.submit.Execute(context.Background(),
+	waiting, err := f.submit.Execute(callerContext(),
 		f.reversalOf("REFUND", "25.00", "refund-1", "bet-1"))
 	if err != nil {
 		t.Fatal(err)
@@ -327,7 +326,7 @@ func TestTheWorkerResolvesAWaitingReversal(t *testing.T) {
 	worker := f.worker()
 	// Far enough for the first attempt to come due, well short of the TTL.
 	f.clock.advance(5 * time.Millisecond)
-	if _, err := worker.RunOnce(context.Background()); err != nil {
+	if _, err := worker.RunOnce(callerContext()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	if statusOf(t, f, waiting.Transaction.ID()) != domain.StatusPendingReference {
@@ -339,7 +338,7 @@ func TestTheWorkerResolvesAWaitingReversal(t *testing.T) {
 
 	// ...and the next pass applies it.
 	f.clock.advance(5 * time.Millisecond)
-	handled, err := worker.RunOnce(context.Background())
+	handled, err := worker.RunOnce(callerContext())
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
@@ -360,7 +359,7 @@ func TestTheWaitEndsWhenTheDeadlinePasses(t *testing.T) {
 	t.Parallel()
 	f := newSubmitFixture(t, "100.00")
 
-	waiting, err := f.submit.Execute(context.Background(),
+	waiting, err := f.submit.Execute(callerContext(),
 		f.reversalOf("REFUND", "25.00", "refund-1", "never-arrives"))
 	if err != nil {
 		t.Fatal(err)
@@ -374,7 +373,7 @@ func TestTheWaitEndsWhenTheDeadlinePasses(t *testing.T) {
 	worker := f.worker()
 	for i := 0; i < 20; i++ {
 		f.clock.advance(10 * time.Millisecond)
-		if _, err := worker.RunOnce(context.Background()); err != nil {
+		if _, err := worker.RunOnce(callerContext()); err != nil {
 			t.Fatalf("RunOnce: %v", err)
 		}
 		if statusOf(t, f, waiting.Transaction.ID()) == domain.StatusRejected {
@@ -399,7 +398,7 @@ func TestAWaitingReversalRejectsWhenItsReferenceEndsBadly(t *testing.T) {
 	f := newSubmitFixture(t, "100.00")
 
 	// The rollback arrives first...
-	waiting, err := f.submit.Execute(context.Background(),
+	waiting, err := f.submit.Execute(callerContext(),
 		f.reversalOf("ROLLBACK", "500.00", "rollback-1", "bet-1"))
 	if err != nil {
 		t.Fatal(err)
@@ -410,7 +409,7 @@ func TestAWaitingReversalRejectsWhenItsReferenceEndsBadly(t *testing.T) {
 	mustSubmit(t, f, f.command("BET", "500.00", "bet-1"))
 
 	f.clock.advance(5 * time.Millisecond)
-	if _, err := f.worker().RunOnce(context.Background()); err != nil {
+	if _, err := f.worker().RunOnce(callerContext()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -427,7 +426,7 @@ func TestTheWorkerDoesNothingWhenNothingIsDue(t *testing.T) {
 	t.Parallel()
 	f := newSubmitFixture(t, "100.00")
 
-	handled, err := f.worker().RunOnce(context.Background())
+	handled, err := f.worker().RunOnce(callerContext())
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
@@ -469,7 +468,7 @@ func TestReferencePolicyBackoffGrowsAndIsJittered(t *testing.T) {
 
 func mustSubmit(t *testing.T, f submitFixture, cmd SubmitCommand) SubmitResult {
 	t.Helper()
-	result, err := f.submit.Execute(context.Background(), cmd)
+	result, err := f.submit.Execute(callerContext(), cmd)
 	if err != nil {
 		t.Fatalf("submitting %s: %v", cmd.Kind, err)
 	}
@@ -478,7 +477,7 @@ func mustSubmit(t *testing.T, f submitFixture, cmd SubmitCommand) SubmitResult {
 
 func transactionOf(t *testing.T, f submitFixture, id domain.TransactionID) domain.WagerTransaction {
 	t.Helper()
-	stored, err := (&memoryQueries{store: f.store}).Transactions().FindByID(context.Background(), id)
+	stored, err := (&memoryQueries{store: f.store}).Transactions().FindByID(callerContext(), id)
 	if err != nil {
 		t.Fatalf("reading transaction %s: %v", id, err)
 	}

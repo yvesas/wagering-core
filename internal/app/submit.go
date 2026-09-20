@@ -105,8 +105,20 @@ func (uc *SubmitTransaction) Execute(ctx context.Context, cmd SubmitCommand) (Su
 // costs nothing; on the queue path it is what lets the inbox record and the
 // financial effect be one commit.
 func (uc *SubmitTransaction) ExecuteIn(ctx context.Context, repos Repositories, cmd SubmitCommand) (SubmitResult, error) {
+	// Authorisation is here, in the code both ports share, and not in the HTTP
+	// handler. Written at the edge it would be an HTTP rule, and the queue --
+	// which reaches this same method -- would have none. See
+	// docs/adr/0011-authentication-and-isolation.md.
+	identity, err := caller(ctx, ScopeSubmit)
+	if err != nil {
+		return SubmitResult{}, err
+	}
+
 	parsed, err := uc.parse(cmd)
 	if err != nil {
+		return SubmitResult{}, err
+	}
+	if err := identity.mayActAs(parsed.providerID); err != nil {
 		return SubmitResult{}, err
 	}
 
