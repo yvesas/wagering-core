@@ -300,8 +300,34 @@ func (m *memoryLedger) ListByWallet(context.Context, domain.WalletID, LedgerCurs
 	return LedgerPage{}, nil
 }
 
-func (m *memoryLedger) SumByWallet(context.Context, domain.WalletID, domain.Currency) (domain.Money, int, error) {
-	return domain.Money{}, 0, nil
+// SumByWallet folds the entries the way the SQL does: credits minus debits.
+//
+// It is a real implementation and not a stub because reconciliation is the one
+// use case whose whole job is this sum -- a fake returning zero would let every
+// reconciliation test pass against a wallet with money in it.
+func (m *memoryLedger) SumByWallet(_ context.Context, wallet domain.WalletID, currency domain.Currency) (domain.Money, int, error) {
+	total, err := domain.ZeroMoney(currency)
+	if err != nil {
+		return domain.Money{}, 0, err
+	}
+	count := 0
+
+	for _, entry := range m.store.entries {
+		if entry.WalletID() != wallet {
+			continue
+		}
+		count++
+
+		if entry.Direction() == domain.Credit {
+			total, err = total.Add(entry.Amount())
+		} else {
+			total, err = total.Sub(entry.Amount())
+		}
+		if err != nil {
+			return domain.Money{}, 0, err
+		}
+	}
+	return total, count, nil
 }
 
 type memoryTx struct{ store *memoryStore }

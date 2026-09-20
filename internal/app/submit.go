@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/yvesas/wagering-core/internal/domain"
@@ -43,9 +44,13 @@ type SubmitTransaction struct {
 	waiting ReferencePolicy
 	events  eventRecorder
 	metrics OperationMetrics
+	logger  *slog.Logger
 }
 
-func NewSubmitTransaction(uow UnitOfWork, queries Queries, ids IDGenerator, clock Clock, waiting ReferencePolicy, metrics OperationMetrics) *SubmitTransaction {
+func NewSubmitTransaction(uow UnitOfWork, queries Queries, ids IDGenerator, clock Clock, waiting ReferencePolicy, metrics OperationMetrics, logger *slog.Logger) *SubmitTransaction {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &SubmitTransaction{
 		uow:     uow,
 		queries: queries,
@@ -54,6 +59,7 @@ func NewSubmitTransaction(uow UnitOfWork, queries Queries, ids IDGenerator, cloc
 		waiting: waiting.normalised(),
 		events:  newEventRecorder(ids, clock),
 		metrics: operationMetricsOr(metrics),
+		logger:  logger,
 	}
 }
 
@@ -66,23 +72,23 @@ func NewSubmitTransaction(uow UnitOfWork, queries Queries, ids IDGenerator, cloc
 func (uc *SubmitTransaction) Execute(ctx context.Context, cmd SubmitCommand) (SubmitResult, error) {
 	started := time.Now()
 	result, err := uc.execute(ctx, cmd)
-	uc.Record(SourceHTTP, time.Since(started), result, err)
+	uc.Settled(ctx, SourceHTTP, time.Since(started), result, err)
 	return result, err
 }
 
-// Record puts one settled operation on the meters.
+// Settled reports one finished operation, to the meters and to the log.
 //
-// It is exported because the queue is an entry port too and records the same
-// things with a different source. The alternative -- recording inside the code
+// It is exported because the queue is an entry port too and reports the same
+// things with a different source. The alternative -- reporting inside the code
 // both ports share -- would need the source to travel down there, and the
-// source is a property of the port, which is the one thing the shared code
+// source is a property of the port, which is the one thing that shared code
 // deliberately does not know.
 //
 // The elapsed time comes from time.Now and not from the Clock port. The clock
 // exists so a business timestamp is decided by the caller rather than by the
 // machine; a duration on a histogram is a measurement, and reading it from a
 // movable test clock would make every observation zero.
-func (uc *SubmitTransaction) Record(source string, took time.Duration, result SubmitResult, err error) {
+func (uc *SubmitTransaction) Settled(ctx context.Context, source string, took time.Duration, result SubmitResult, err error) {
 	uc.metrics.OperationLatency(source, took)
 
 	if err != nil {
@@ -99,8 +105,27 @@ func (uc *SubmitTransaction) Record(source string, took time.Duration, result Su
 	// label pair bounded. A rejection is an outcome like any other and is
 	// counted here, not as an error: that is the whole point of recording the
 	// refusal rather than returning it.
+	transaction := result.Transaction
 	uc.metrics.OperationSettled(source,
-		string(result.Transaction.Kind()), string(result.Transaction.Status()))
+		string(transaction.Kind()), string(transaction.Status()))
+
+	// The identifiers REQ-OBS-001 asks for, on the one line that has all of
+	// them. What is *not* here is the amount and the balance: a log aggregator
+	// is not where a financial payload belongs, and the transaction id is
+	// enough to find both in the database for anyone entitled to see them.
+	uc.logger.InfoContext(ctx, "operation settled",
+		slog.String("source", source),
+		slog.String("transactionId", transaction.ID().String()),
+		slog.String("walletId", transaction.WalletID().String()),
+		slog.String("playerId", transaction.PlayerID().String()),
+		slog.String("providerId", transaction.ProviderID().String()),
+		slog.String("externalTransactionId", transaction.ExternalID().String()),
+		slog.String("kind", string(transaction.Kind())),
+		slog.String("status", string(transaction.Status())),
+		slog.String("failureCode", string(transaction.FailureCode())),
+		slog.Bool("replay", result.Replay),
+		slog.Duration("took", took),
+		slog.String("correlationId", CorrelationIDFrom(ctx)))
 }
 
 func (uc *SubmitTransaction) execute(ctx context.Context, cmd SubmitCommand) (SubmitResult, error) {

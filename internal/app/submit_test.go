@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -38,6 +39,13 @@ type submitFixture struct {
 // tests run against is a wallet the system itself produced.
 func newSubmitFixture(t *testing.T, balance string) submitFixture {
 	t.Helper()
+	return newSubmitFixtureWithLogger(t, balance, discardLogger())
+}
+
+// newSubmitFixtureWithLogger is newSubmitFixture with somewhere to read the log
+// lines back from, for the tests that are about what gets written.
+func newSubmitFixtureWithLogger(t *testing.T, balance string, logger *slog.Logger) submitFixture {
+	t.Helper()
 	store := &memoryStore{}
 	ids := &fakeIDs{}
 	clock := newMovableClock(time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC))
@@ -56,7 +64,7 @@ func newSubmitFixture(t *testing.T, balance string) submitFixture {
 	}
 
 	return submitFixture{
-		submit:  NewSubmitTransaction(uow, queries, ids, clock, testReferencePolicy, recorder),
+		submit:  NewSubmitTransaction(uow, queries, ids, clock, testReferencePolicy, recorder, logger),
 		store:   store,
 		wallet:  wallet,
 		clock:   clock,
@@ -347,7 +355,7 @@ func TestIdempotencyDoesNotDependOnProcessMemory(t *testing.T) {
 		&memoryQueries{store: f.store},
 		&fakeIDs{},
 		f.clock,
-		testReferencePolicy, newRecordingMetrics(),
+		testReferencePolicy, newRecordingMetrics(), discardLogger(),
 	)
 
 	replay, err := restarted.Execute(callerContext(), cmd)

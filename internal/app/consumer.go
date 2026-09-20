@@ -238,6 +238,10 @@ func (c *Consumer) handle(ctx context.Context, message QueueMessage) {
 		return
 	}
 
+	// The work context, so the log lines the use case writes carry the same
+	// correlation id as the ones written here.
+	work := WithCorrelationID(ctx, envelope.MessageID)
+
 	started := time.Now()
 	result, decided, err := c.apply(ctx, envelope, cmd, identity)
 	if err != nil {
@@ -257,15 +261,16 @@ func (c *Consumer) handle(ctx context.Context, message QueueMessage) {
 		// operation. One that found the work already done is a duplicate, and
 		// folding it in would make the latency of a redelivery storm look like
 		// an improvement.
-		c.submit.Record(SourceQueue, time.Since(started), result, nil)
+		c.submit.Settled(work, SourceQueue, time.Since(started), result, nil)
 
-		c.logger.Info("applied from the queue",
+		// One line about the delivery, carrying the message id; the use case
+		// logs the operation itself with the business identifiers. Two lines
+		// because they answer two questions -- "did this message get handled"
+		// and "what happened to this bet" -- and the transaction id joins them.
+		c.logger.Info("delivery handled",
 			slog.String("consumer", c.cfg.Name),
 			slog.String("messageId", envelope.MessageID),
-			slog.String("transactionId", result.Transaction.ID().String()),
-			slog.String("walletId", result.Transaction.WalletID().String()),
-			slog.String("providerId", result.Transaction.ProviderID().String()),
-			slog.String("status", string(result.Transaction.Status())))
+			slog.String("transactionId", result.Transaction.ID().String()))
 	} else {
 		// Absorbed by the inbox. A steady trickle is the at-least-once
 		// contract working; a spike is something upstream redelivering.
