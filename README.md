@@ -27,9 +27,10 @@ repositório, na pasta de controle ao lado.
 | 6 | Reversões e resolução de referência | pronta |
 | 7 | Consumo por fila, com registro de entrada | pronta |
 | 8 | Publicação por registro de saída | pronta |
+| 9 | Autenticação OIDC e isolamento entre provedores | pronta |
 
-Fases 9 e 10 — autenticação, observabilidade e reconciliação — estão
-especificadas em `specs/project/REQUIREMENTS.md`.
+A fase 10 — observabilidade e reconciliação — está especificada em
+`specs/project/REQUIREMENTS.md`.
 
 ## Pré-requisitos
 
@@ -42,8 +43,20 @@ especificadas em `specs/project/REQUIREMENTS.md`.
 git clone <url> && cd wagering-core
 make setup            # aponta o git para .githooks e verifica o hook
 cp .env.example .env  # ajuste o que precisar; nenhum segredo real entra aqui
-make up               # sobe PostgreSQL e demais dependências locais
+make up               # sobe PostgreSQL, o emulador de fila e o Keycloak local
 ```
+
+**Todo endpoint de negócio exige um token.** Não há chave que desligue a
+autenticação — essa chave é justamente aquela cujo valor errado é invisível.
+O `make up` sobe um Keycloak com um realm de desenvolvimento importado, e:
+
+```sh
+make token CLIENT=platform        # o serviço interno: abre e lê carteira
+make token CLIENT=provider-acme   # um provedor: envia e lê as próprias operações
+make token CLIENT=provider-rival  # outro provedor, para tentar o isolamento
+```
+
+Como cada credencial é limitada está em `docs/security.md`.
 
 > **`make setup` não é opcional.** `core.hooksPath` é configuração local do git
 > e não vem no clone. Sem ele, o hook `commit-msg` existe no repositório e nunca
@@ -61,6 +74,7 @@ make race     # go test -race ./...
 make vet      # go vet ./...
 make fmt      # formata
 make cover    # cobertura em coverage.html
+make token    # imprime um token do Keycloak local (CLIENT=...)
 make up       # sobe o ambiente local
 make down     # derruba e apaga os volumes
 ```
@@ -78,6 +92,7 @@ versionado com valores locais de exemplo; `.env` nunca é.
 |---|---|
 | Contrato da API | `docs/api.md` |
 | Contrato dos eventos | `docs/events.md` |
+| Autenticação e isolamento | `docs/security.md` |
 | Visão, princípios e stack | `specs/project/PROJECT.md` |
 | Requisitos com ID rastreável | `specs/project/REQUIREMENTS.md` |
 | O que está sendo construído agora | `specs/features/NNNN-slug/spec.md` |

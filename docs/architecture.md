@@ -21,6 +21,7 @@ internal/domain/            o núcleo, sem import de infraestrutura
 
 internal/app/               as portas, declaradas por quem consome
 ├── ports.go                leitores, repositórios, Repositories, UnitOfWork
+├── identity.go             quem está chamando, e o que pode fazer
 └── errors.go               as falhas que um adaptador pode reportar
 
 internal/adapter/postgres/  a implementação
@@ -31,9 +32,15 @@ internal/adapter/postgres/  a implementação
 
 internal/adapter/http/      a borda de entrada
 ├── server.go               rotas, middleware, timeouts
+├── auth.go                 o token vira identidade, e para aí
 ├── wallet.go               handlers e DTOs
 ├── health.go               liveness e readiness
 └── errors.go               erro → status, tabela exaustiva
+
+internal/adapter/oidc/      verificação de token contra o IdP externo
+├── oidc.go                 discovery, claims e a lista de algoritmos aceitos
+├── jwks.go                 o conjunto de chaves, com cache e rotação
+└── oidctest/               um emissor em processo, para as três suítes
 
 internal/adapter/system/    relógio e geração de identidade (UUIDv7)
 
@@ -202,6 +209,27 @@ nome vazaria detalhe de schema e faria o tratamento de erro do cliente depender
 dele — renomear constraint é migration, não mudança de contrato.
 
 Contrato completo em `docs/api.md`.
+
+## Identidade
+
+**O handler autentica, o caso de uso autoriza.** O middleware transforma o
+`Bearer` token numa `app.Identity` e a põe no `context`; quem decide o que essa
+identidade pode fazer é a camada de aplicação — porque a fila chama o mesmo caso
+de uso sem passar por handler nenhum. É a golden rule aplicada a segurança.
+
+Todo caso de uso começa pedindo o chamador, e um `context` sem identidade
+encerra a chamada. Não há fallback para "anônimo", que é o que torna esquecer de
+autenticar um erro alto em vez de um buraco silencioso.
+
+A tabela de rotas carrega se a rota é pública, e o **valor zero é protegida**.
+Um teste percorre a própria tabela, então rota nova já nasce coberta.
+
+O `providerId` vem do token, nunca do corpo: o corpo pode concordar, e discordar
+é 403. Ler operação de outro provedor é 404 — o mesmo erro de uma que nunca
+existiu, porque recusar é confirmar que há o que recusar.
+
+Decisões em `docs/adr/0011-authentication-and-isolation.md`; escopos, rotação de
+chave e o IdP local em `docs/security.md`.
 
 ## Idempotência
 
@@ -434,5 +462,5 @@ créditos menos débitos.
 
 ## O que ainda não existe
 
-Autenticação OIDC, métricas e reconciliação. A ordem em que entram está no plano de ação, fora do
+Métricas e reconciliação. A ordem em que entram está no plano de ação, fora do
 repositório.

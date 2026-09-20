@@ -19,6 +19,28 @@ ninguém explica depois.
 **`X-Correlation-Id`** é lido da requisição quando presente e devolvido sempre.
 Trace que começou antes mantém a identidade atravessando este serviço.
 
+## Autenticação
+
+**Todo endpoint de negócio exige um `Bearer` token** emitido pelo IdP
+configurado, para a audience deste serviço. Só `GET /health/live` e
+`GET /health/ready` respondem sem credencial.
+
+```
+Authorization: Bearer eyJhbGciOiJSUzI1NiIs...
+```
+
+O token diz por qual provedor o chamador age (claim `provider_id`) e o que ele
+pode fazer (escopos `wagering:submit`, `wagering:read`, `wallets:manage`).
+**O token é a autoridade sobre o `providerId`:** um corpo que nomeie outro
+provedor é recusado com 403, e operação de outro provedor some do mapa — 404,
+igual a uma que nunca existiu.
+
+Um 401 nunca diz por quê, e vem com
+`WWW-Authenticate: Bearer realm="wagering-core", error="invalid_token"`.
+
+Detalhe de escopo, isolamento e rotação de chave em
+[`security.md`](security.md).
+
 ## Erros
 
 ```json
@@ -42,7 +64,9 @@ para o log junto do `correlationId`.
 | Valor fora do alcance representável | 400 | `AMOUNT_OVERFLOW` |
 | Moeda fora de ISO 4217 maiúsculo | 400 | `INVALID_CURRENCY` |
 | Identificador vazio ou grande demais | 400 | `INVALID_IDENTIFIER` |
-| Carteira não encontrada | 404 | `NOT_FOUND` |
+| Credencial ausente, inválida ou expirada | 401 | `UNAUTHENTICATED` |
+| Credencial sem o escopo, ou agindo por outro provedor | 403 | `FORBIDDEN` |
+| Carteira não encontrada, **ou operação de outro provedor** | 404 | `NOT_FOUND` |
 | Método não suportado no caminho | 405 | — (sem corpo, com `Allow`) |
 | Jogador já tem carteira nessa moeda | 409 | `WALLET_ALREADY_EXISTS` |
 | Carteira já foi aberta | 409 | `WALLET_ALREADY_OPENED` |

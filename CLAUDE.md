@@ -4,8 +4,7 @@
 
 Serviço distribuído de carteira e ledger financeiro para operações de jogo,
 com entrada por HTTP e por fila produzindo o mesmo resultado. Projeto de estudo.
-Go · Uber Fx · PostgreSQL com `pgx` · Docker Compose · `-race`. Fila e OIDC nas
-fases 7 e 9.
+Go · Uber Fx · PostgreSQL com `pgx` · SQS · OIDC · Docker Compose · `-race`.
 
 ## Golden rule
 
@@ -18,6 +17,10 @@ go list -deps ./internal/domain/... | grep -E 'go.uber.org/fx|jackc/pgx|net/http
 Saída vazia, ou a regra foi quebrada. Há duas portas de entrada que precisam
 produzir o mesmo resultado; invariante que mora num handler some na segunda.
 
+Vale para autorização também: **o handler autentica, o caso de uso autoriza.**
+A fila chama o mesmo caso de uso sem passar por middleware nenhum. Ver
+`docs/adr/0011-authentication-and-isolation.md`.
+
 ## Arquitetura
 
 Hexagonal, dependência sempre para dentro: `adapter → app → domain`.
@@ -27,7 +30,7 @@ Hexagonal, dependência sempre para dentro: `adapter → app → domain`.
 | `cmd/` | Binários; cada um monta seu grafo Fx e mais nada |
 | `internal/domain/` | Entidades, value objects, invariantes, erros — sem infra |
 | `internal/app/` | Casos de uso e as portas que exigem |
-| `internal/adapter/` | HTTP, PostgreSQL, fila |
+| `internal/adapter/` | HTTP, PostgreSQL, fila, verificação de token |
 | `internal/platform/` | Config, log, métricas, módulos Fx compartilhados |
 | `migrations/` · `test/` | SQL versionado · integração com containers reais |
 
@@ -83,6 +86,8 @@ requisitos de produto, e nenhum arquivo cita empresa, marca ou terceiro.
   execução — cenário de concorrência exige disputa real e repetição.
 - **Replay devolve o saldo do processamento original**, não o atual. Fácil de
   implementar errado e passar no teste do caminho feliz.
+- **Caso de uso chamado sem identidade no `context` falha**, de propósito. Teste
+  novo que instancia um caso de uso precisa dizer quem está chamando.
 
 ## Onde fica o quê
 

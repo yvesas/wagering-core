@@ -17,10 +17,18 @@ type stubOpener struct {
 	wallet domain.Wallet
 	err    error
 	got    app.OpenWalletCommand
+
+	// inspect sees the caller the edge established, which is how a test proves
+	// the identity travelled rather than that the handler compiled.
+	inspect func(app.Identity)
 }
 
-func (s *stubOpener) Execute(_ context.Context, cmd app.OpenWalletCommand) (domain.Wallet, error) {
+func (s *stubOpener) Execute(ctx context.Context, cmd app.OpenWalletCommand) (domain.Wallet, error) {
 	s.got = cmd
+	if s.inspect != nil {
+		identity, _ := app.IdentityFrom(ctx)
+		s.inspect(identity)
+	}
 	return s.wallet, s.err
 }
 
@@ -72,7 +80,7 @@ func sampleWallet(t *testing.T) domain.Wallet {
 
 func serve(t *testing.T, handler *WalletHandler, method, target, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	mux := Routes(handler, NewTransactionHandler(&stubSubmitter{}, &stubTxReader{}), NewHealthHandler())
+	mux := Routes(testAuth(t), handler, NewTransactionHandler(&stubSubmitter{}, &stubTxReader{}), NewHealthHandler())
 
 	var reader *strings.Reader
 	if body == "" {
@@ -80,7 +88,7 @@ func serve(t *testing.T, handler *WalletHandler, method, target, body string) *h
 	} else {
 		reader = strings.NewReader(body)
 	}
-	req := httptest.NewRequest(method, target, reader)
+	req := authenticated(httptest.NewRequest(method, target, reader))
 	rec := httptest.NewRecorder()
 	Handler(mux).ServeHTTP(rec, req)
 	return rec
@@ -237,7 +245,7 @@ func TestInternalErrorsDoNotReachTheClient(t *testing.T) {
 func TestCorrelationIDIsEchoedAndReused(t *testing.T) {
 	t.Parallel()
 	handler := NewWalletHandler(&stubOpener{wallet: sampleWallet(t)}, &stubReader{})
-	mux := Handler(Routes(handler, NewTransactionHandler(&stubSubmitter{}, &stubTxReader{}), NewHealthHandler()))
+	mux := Handler(Routes(testAuth(t), handler, NewTransactionHandler(&stubSubmitter{}, &stubTxReader{}), NewHealthHandler()))
 
 	t.Run("generated when absent", func(t *testing.T) {
 		t.Parallel()
@@ -380,7 +388,7 @@ func TestHealthLiveTouchesNoDependency(t *testing.T) {
 	// A liveness check that needs a database turns a brief database blip into
 	// every replica being restarted at once.
 	health := NewHealthHandler(failingProbe{})
-	mux := Handler(Routes(NewWalletHandler(&stubOpener{}, &stubReader{}),
+	mux := Handler(Routes(testAuth(t), NewWalletHandler(&stubOpener{}, &stubReader{}),
 		NewTransactionHandler(&stubSubmitter{}, &stubTxReader{}), health))
 
 	rec := httptest.NewRecorder()

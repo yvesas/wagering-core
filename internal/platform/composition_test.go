@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
+	"github.com/yvesas/wagering-core/internal/adapter/oidc/oidctest"
 	"github.com/yvesas/wagering-core/internal/platform"
 )
 
@@ -47,7 +48,11 @@ func freePort(t *testing.T) string {
 
 func setTestEnv(t *testing.T, addr string) {
 	t.Helper()
+
 	for key, value := range map[string]string{
+		"OIDC_ISSUER_URL": issuer.URL(),
+		"OIDC_AUDIENCE":   oidctest.Audience,
+
 		"APP_ENV":              "test",
 		"APP_HTTP_ADDR":        addr,
 		"APP_LOG_LEVEL":        "error",
@@ -231,26 +236,85 @@ func TestPortAlreadyInUseFailsTheStart(t *testing.T) {
 	}
 }
 
-func get(t *testing.T, url string) (string, int) {
-	t.Helper()
-	resp, err := http.Get(url)
+// The identity provider these tests authenticate against.
+//
+// The graph reaches it while it is being built, so it has to outlive any one
+// test. What is under test here is composition -- that the whole thing stands
+// up, serves and shuts down -- so every request carries one credential with
+// every scope. Who may do what is proved in internal/app, against the use cases
+// that decide it.
+var issuer *oidctest.Issuer
+
+func TestMain(m *testing.M) {
+	started, err := oidctest.New()
 	if err != nil {
-		t.Fatalf("GET %s: %v", url, err)
+		fmt.Fprintf(os.Stderr, "starting the test issuer: %v\n", err)
+		os.Exit(1)
+	}
+	issuer = started
+
+	code := m.Run()
+	issuer.Close()
+	os.Exit(code)
+}
+
+// credentialFor mints a token that acts for a provider and carries every scope.
+//
+// Every scope on purpose: these tests are about composition -- that the whole
+// thing stands up, serves and shuts down -- so a missing scope would fail them
+// for a reason that has nothing to do with what they assert. Who may do what is
+// proved in internal/app, against the use cases that decide it.
+func credentialFor(t *testing.T, providerID string) string {
+	t.Helper()
+	token, err := issuer.Token(issuer.Claims(providerID,
+		"wagering:submit", "wagering:read", "wallets:manage"))
+	if err != nil {
+		t.Fatalf("minting a token: %v", err)
+	}
+	return token
+}
+
+func credential(t *testing.T) string {
+	t.Helper()
+	return credentialFor(t, "provider-a")
+}
+
+func do(t *testing.T, method, url, token, payload string, headers map[string]string) (string, int) {
+	t.Helper()
+
+	var body io.Reader
+	if payload != "" {
+		body = strings.NewReader(payload)
+	}
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		t.Fatalf("building the request: %v", err)
+	}
+	if payload != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return string(body), resp.StatusCode
+	answer, _ := io.ReadAll(resp.Body)
+	return string(answer), resp.StatusCode
+}
+
+func get(t *testing.T, url string) (string, int) {
+	t.Helper()
+	return do(t, http.MethodGet, url, credential(t), "", nil)
 }
 
 func post(t *testing.T, url, payload string) (string, int) {
 	t.Helper()
-	resp, err := http.Post(url, "application/json", strings.NewReader(payload))
-	if err != nil {
-		t.Fatalf("POST %s: %v", url, err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return string(body), resp.StatusCode
+	return do(t, http.MethodPost, url, credential(t), payload, nil)
 }
 
 // TestIdempotencySurvivesARestart is the test the whole phase exists for.
@@ -520,20 +584,25 @@ func openWallet(t *testing.T, base, playerID, amount string) string {
 	return created.ID
 }
 
+// submit sends an operation under the credential of the provider the operation
+// itself names.
+//
+// The provider is read out of the payload rather than passed alongside it. The
+// two have to agree -- the token is the authority over providerId and a
+// disagreement is a 403 -- and a second copy of the string in every call is a
+// second copy to get out of step. These tests give each run its own provider so
+// their rows cannot collide with an earlier one's.
 func submit(t *testing.T, base, key, payload string) (string, int) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, base+"/wagering/transactions", strings.NewReader(payload))
-	if err != nil {
-		t.Fatalf("building the request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", key)
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("submitting: %v", err)
+	var operation struct {
+		ProviderID string `json:"providerId"`
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return string(body), resp.StatusCode
+	if err := json.Unmarshal([]byte(payload), &operation); err != nil {
+		t.Fatalf("reading the provider out of %s: %v", payload, err)
+	}
+
+	return do(t, http.MethodPost, base+"/wagering/transactions",
+		credentialFor(t, operation.ProviderID), payload,
+		map[string]string{"Idempotency-Key": key})
 }

@@ -5,6 +5,9 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
+
+	"github.com/yvesas/wagering-core/internal/adapter/oidc"
 )
 
 // DatabaseConfig is what it takes to reach PostgreSQL.
@@ -100,4 +103,48 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// OIDCConfig is what it takes to trust the identity provider.
+type OIDCConfig struct {
+	IssuerURL     string
+	Audience      string
+	ProviderClaim string
+	CacheTTL      time.Duration
+	Leeway        time.Duration
+}
+
+// OIDCConfigFromEnv reads the identity settings.
+//
+// The issuer and the audience have no default and no way to be switched off.
+// An "auth disabled" flag would be the one setting whose wrong value is
+// invisible -- everything works, and nothing is checked -- and it would exist
+// only to make local development convenient, which is what the identity
+// provider in docker-compose.yml is for.
+func OIDCConfigFromEnv() (OIDCConfig, error) {
+	cfg := OIDCConfig{
+		IssuerURL:     os.Getenv("OIDC_ISSUER_URL"),
+		Audience:      os.Getenv("OIDC_AUDIENCE"),
+		ProviderClaim: envOr("OIDC_PROVIDER_CLAIM", oidc.DefaultProviderClaim),
+	}
+
+	var missing []string
+	if cfg.IssuerURL == "" {
+		missing = append(missing, "OIDC_ISSUER_URL")
+	}
+	if cfg.Audience == "" {
+		missing = append(missing, "OIDC_AUDIENCE")
+	}
+	if len(missing) > 0 {
+		return OIDCConfig{}, fmt.Errorf("missing identity settings: %s", strings.Join(missing, ", "))
+	}
+
+	var err error
+	if cfg.CacheTTL, err = durationEnv("OIDC_JWKS_CACHE_TTL", oidc.DefaultCacheTTL); err != nil {
+		return OIDCConfig{}, err
+	}
+	if cfg.Leeway, err = durationEnv("OIDC_CLOCK_SKEW", oidc.DefaultLeeway); err != nil {
+		return OIDCConfig{}, err
+	}
+	return cfg, nil
 }

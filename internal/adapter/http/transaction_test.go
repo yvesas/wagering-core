@@ -90,9 +90,9 @@ const validSubmitBody = `{
 func submitRequestFor(t *testing.T, submitter *stubSubmitter, key, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	handler := NewTransactionHandler(submitter, &stubTxReader{})
-	mux := Handler(Routes(NewWalletHandler(&stubOpener{}, &stubReader{}), handler, NewHealthHandler()))
+	mux := Handler(Routes(testAuth(t), NewWalletHandler(&stubOpener{}, &stubReader{}), handler, NewHealthHandler()))
 
-	req := httptest.NewRequest(http.MethodPost, "/wagering/transactions", strings.NewReader(body))
+	req := authenticated(httptest.NewRequest(http.MethodPost, "/wagering/transactions", strings.NewReader(body)))
 	if key != "" {
 		req.Header.Set(IdempotencyKeyHeader, key)
 	}
@@ -247,11 +247,11 @@ func TestGetTransactionByProviderUsesBothPathValues(t *testing.T) {
 	t.Parallel()
 	reader := &stubTxReader{transaction: sampleTransaction(t, domain.StatusProcessed, "")}
 	handler := NewTransactionHandler(&stubSubmitter{}, reader)
-	mux := Handler(Routes(NewWalletHandler(&stubOpener{}, &stubReader{}), handler, NewHealthHandler()))
+	mux := Handler(Routes(testAuth(t), NewWalletHandler(&stubOpener{}, &stubReader{}), handler, NewHealthHandler()))
 
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet,
-		"/providers/provider-a/wagering/transactions/transaction-123", nil))
+	mux.ServeHTTP(rec, authenticated(httptest.NewRequest(http.MethodGet,
+		"/providers/provider-a/wagering/transactions/transaction-123", nil)))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
@@ -265,10 +265,10 @@ func TestAnUnprocessedTransactionHasNoBalance(t *testing.T) {
 	t.Parallel()
 	reader := &stubTxReader{transaction: sampleTransaction(t, domain.StatusRejected, domain.CodeInsufficientFunds)}
 	handler := NewTransactionHandler(&stubSubmitter{}, reader)
-	mux := Handler(Routes(NewWalletHandler(&stubOpener{}, &stubReader{}), handler, NewHealthHandler()))
+	mux := Handler(Routes(testAuth(t), NewWalletHandler(&stubOpener{}, &stubReader{}), handler, NewHealthHandler()))
 
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/wagering/transactions/tx-1", nil))
+	mux.ServeHTTP(rec, authenticated(httptest.NewRequest(http.MethodGet, "/wagering/transactions/tx-1", nil)))
 
 	body := decodeBody[transactionResponse](t, rec)
 	// Rendering zero would be a lie about what the wallet held.

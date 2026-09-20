@@ -1,5 +1,4 @@
-# Local environment: PostgreSQL and an SQS emulator. The identity provider
-# arrives in phase 9.
+# Local environment: PostgreSQL, an SQS emulator and an identity provider.
 
 services:
   postgres:
@@ -84,6 +83,47 @@ services:
       retries: 20
       start_period: 10s
     profiles: ["test"]
+
+  # The identity provider.
+  #
+  # Keycloak rather than an issuer written here, and it costs a heavy container
+  # in `make up`. An issuer of our own would prove only that our code agrees
+  # with our code: discovery, the key set and rotation would be our reading of
+  # the specification on both sides of the conversation.
+  #
+  # It is deliberately absent from the automated tests, which sign with a key
+  # generated on the spot and serve the key set in process. Nothing here is
+  # needed to run `make check`.
+  #
+  # The realm is imported on every start and nothing is persisted: this is a
+  # development issuer, and a clean one every time is worth more than any state
+  # it could keep.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: wagering-keycloak
+    command: ["start-dev", "--import-realm", "--http-port=8080"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-local-dev-only}
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./deploy/keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
+    ports:
+      - "${OIDC_PORT:-8081}:8080"
+    healthcheck:
+      # The management port, which is where Keycloak 25+ serves health. The
+      # image ships neither curl nor wget, so this goes through bash's own
+      # /dev/tcp redirection -- ugly, and it is what a distroless image leaves.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q UP <&3
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
 
 volumes:
   postgres-data:

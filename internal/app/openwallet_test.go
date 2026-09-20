@@ -396,7 +396,7 @@ func TestOpenWalletWithBalance(t *testing.T) {
 	t.Parallel()
 	uc, store, ids := newFixture()
 
-	wallet, err := uc.Execute(context.Background(), OpenWalletCommand{
+	wallet, err := uc.Execute(callerContext(), OpenWalletCommand{
 		PlayerID: "player-1",
 		Amount:   "1000.00",
 		Currency: "BRL",
@@ -442,7 +442,7 @@ func TestOpenWalletAtZeroWritesOnlyTheWallet(t *testing.T) {
 	t.Parallel()
 	uc, store, ids := newFixture()
 
-	wallet, err := uc.Execute(context.Background(), OpenWalletCommand{
+	wallet, err := uc.Execute(callerContext(), OpenWalletCommand{
 		PlayerID: "player-1",
 		Amount:   "0.00",
 		Currency: "BRL",
@@ -493,7 +493,7 @@ func TestOpenWalletRejectsBadInput(t *testing.T) {
 			t.Parallel()
 			uc, store, _ := newFixture()
 
-			_, err := uc.Execute(context.Background(), tc.cmd)
+			_, err := uc.Execute(callerContext(), tc.cmd)
 			if err == nil {
 				t.Fatal("want a rejection")
 			}
@@ -518,7 +518,7 @@ func TestOpenWalletPropagatesAConflict(t *testing.T) {
 	uc := NewOpenWallet(&memoryUnitOfWork{store: store}, &fakeIDs{},
 		fakeClock{at: time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)})
 
-	_, err := uc.Execute(context.Background(), OpenWalletCommand{
+	_, err := uc.Execute(callerContext(), OpenWalletCommand{
 		PlayerID: "player-1", Amount: "1.00", Currency: "BRL",
 	})
 	if !errors.Is(err, ErrConflict) {
@@ -548,7 +548,7 @@ func TestOpenWalletDoesNotWriteWhenAnIDCannotBeMinted(t *testing.T) {
 			uc := NewOpenWallet(&memoryUnitOfWork{store: store}, ids,
 				fakeClock{at: time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)})
 
-			_, err := uc.Execute(context.Background(), OpenWalletCommand{
+			_, err := uc.Execute(callerContext(), OpenWalletCommand{
 				PlayerID: "player-1", Amount: "10.00", Currency: "BRL",
 			})
 			if !errors.Is(err, entropy) {
@@ -569,7 +569,7 @@ func TestOpenWalletUsesTheInjectedClock(t *testing.T) {
 	store := &memoryStore{}
 	uc := NewOpenWallet(&memoryUnitOfWork{store: store}, &fakeIDs{}, fakeClock{at: at})
 
-	wallet, err := uc.Execute(context.Background(), OpenWalletCommand{
+	wallet, err := uc.Execute(callerContext(), OpenWalletCommand{
 		PlayerID: "player-1", Amount: "10.00", Currency: "BRL",
 	})
 	if err != nil {
