@@ -26,6 +26,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/yvesas/wagering-core/internal/adapter/oidc/oidctest"
 )
 
 // instances is the number of independent processes. Three, because two can
@@ -120,6 +122,11 @@ func startClusterWith(t *testing.T, overrides map[string]string) cluster {
 		// shutdown assertion wait for it.
 		"QUEUE_WAIT_TIME=1s",
 		"PUBLISHER_INTERVAL=200ms",
+		// The instances authenticate against the issuer running in this test
+		// process. There is no setting that switches this off, so an instance
+		// that could not reach it would not start at all.
+		"OIDC_ISSUER_URL="+issuer.URL(),
+		"OIDC_AUDIENCE="+oidctest.Audience,
 	)
 
 	for key, value := range overrides {
@@ -165,50 +172,66 @@ func waitReady(t *testing.T, base string) {
 
 // --- http helpers ----------------------------------------------------------
 
-func post(t *testing.T, url, payload string) (string, int) {
+// do issues a request with a credential, which every business endpoint now
+// requires. The token is a parameter rather than a default because these
+// scenarios have two callers -- the platform and a provider -- and which one is
+// asking is part of what they assert.
+func do(t *testing.T, method, url, token, payload string, headers map[string]string) (string, int) {
 	t.Helper()
-	resp, err := http.Post(url, "application/json", strings.NewReader(payload))
+
+	var body io.Reader
+	if payload != "" {
+		body = strings.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(context.Background(), method, url, body)
 	if err != nil {
-		t.Fatalf("POST %s: %v", url, err)
+		t.Fatalf("building the request: %v", err)
+	}
+	if payload != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return string(body), resp.StatusCode
+	answer, _ := io.ReadAll(resp.Body)
+	return string(answer), resp.StatusCode
 }
 
-func get(t *testing.T, url string) (string, int) {
+func post(t *testing.T, url, token, payload string) (string, int) {
 	t.Helper()
-	resp, err := http.Get(url)
-	if err != nil {
-		t.Fatalf("GET %s: %v", url, err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return string(body), resp.StatusCode
+	return do(t, http.MethodPost, url, token, payload, nil)
+}
+
+func get(t *testing.T, url, token string) (string, int) {
+	t.Helper()
+	return do(t, http.MethodGet, url, token, "", nil)
 }
 
 func submit(t *testing.T, base, key, payload string) (string, int) {
 	t.Helper()
-	req, err := http.NewRequestWithContext(context.Background(),
-		http.MethodPost, base+"/wagering/transactions", strings.NewReader(payload))
-	if err != nil {
-		t.Fatalf("building the request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", key)
+	return submitAs(t, base, providerToken(t, "provider-a"), key, payload)
+}
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("submitting: %v", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return string(body), resp.StatusCode
+// submitAs is submit with the credential chosen by the caller, for the
+// scenarios that are about who is asking.
+func submitAs(t *testing.T, base, token, key, payload string) (string, int) {
+	t.Helper()
+	return do(t, http.MethodPost, base+"/wagering/transactions", token, payload,
+		map[string]string{"Idempotency-Key": key})
 }
 
 func openWallet(t *testing.T, base, playerID, amount string) string {
 	t.Helper()
-	body, status := post(t, base+"/wallets", fmt.Sprintf(
+	body, status := post(t, base+"/wallets", platformToken(t), fmt.Sprintf(
 		`{"playerId":%q,"initialBalance":{"amount":%q,"currency":"BRL"}}`, playerID, amount))
 	if status != http.StatusCreated {
 		t.Fatalf("opening a wallet: %d %s", status, body)
@@ -244,7 +267,7 @@ type walletState struct {
 
 func readWallet(t *testing.T, base, walletID string) walletState {
 	t.Helper()
-	body, status := get(t, base+"/wallets/"+walletID)
+	body, status := get(t, base+"/wallets/"+walletID, platformToken(t))
 	if status != http.StatusOK {
 		t.Fatalf("reading the wallet: %d %s", status, body)
 	}
@@ -277,7 +300,7 @@ func readLedger(t *testing.T, base, walletID string) ledgerPage {
 		if cursor != "" {
 			url += "&cursor=" + cursor
 		}
-		body, status := get(t, url)
+		body, status := get(t, url, platformToken(t))
 		if status != http.StatusOK {
 			t.Fatalf("reading the ledger: %d %s", status, body)
 		}
@@ -650,7 +673,8 @@ type transactionState struct {
 
 func readTransaction(t *testing.T, base, externalID string) transactionState {
 	t.Helper()
-	body, status := get(t, base+"/providers/provider-a/wagering/transactions/"+externalID)
+	body, status := get(t, base+"/providers/provider-a/wagering/transactions/"+externalID,
+		providerToken(t, "provider-a"))
 	if status != http.StatusOK {
 		t.Fatalf("reading %s: %d %s", externalID, status, body)
 	}

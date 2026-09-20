@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
+	"github.com/yvesas/wagering-core/internal/adapter/oidc/oidctest"
 	"github.com/yvesas/wagering-core/internal/platform"
 )
 
@@ -47,7 +48,11 @@ func freePort(t *testing.T) string {
 
 func setTestEnv(t *testing.T, addr string) {
 	t.Helper()
+
 	for key, value := range map[string]string{
+		"OIDC_ISSUER_URL": issuer.URL(),
+		"OIDC_AUDIENCE":   oidctest.Audience,
+
 		"APP_ENV":              "test",
 		"APP_HTTP_ADDR":        addr,
 		"APP_LOG_LEVEL":        "error",
@@ -231,26 +236,74 @@ func TestPortAlreadyInUseFailsTheStart(t *testing.T) {
 	}
 }
 
-func get(t *testing.T, url string) (string, int) {
-	t.Helper()
-	resp, err := http.Get(url)
+// The identity provider these tests authenticate against.
+//
+// The graph reaches it while it is being built, so it has to outlive any one
+// test. What is under test here is composition -- that the whole thing stands
+// up, serves and shuts down -- so every request carries one credential with
+// every scope. Who may do what is proved in internal/app, against the use cases
+// that decide it.
+var issuer *oidctest.Issuer
+
+func TestMain(m *testing.M) {
+	started, err := oidctest.New()
 	if err != nil {
-		t.Fatalf("GET %s: %v", url, err)
+		fmt.Fprintf(os.Stderr, "starting the test issuer: %v\n", err)
+		os.Exit(1)
+	}
+	issuer = started
+
+	code := m.Run()
+	issuer.Close()
+	os.Exit(code)
+}
+
+func credential(t *testing.T) string {
+	t.Helper()
+	token, err := issuer.Token(issuer.Claims("provider-a",
+		"wagering:submit", "wagering:read", "wallets:manage"))
+	if err != nil {
+		t.Fatalf("minting a token: %v", err)
+	}
+	return token
+}
+
+func do(t *testing.T, method, url, payload string, headers map[string]string) (string, int) {
+	t.Helper()
+
+	var body io.Reader
+	if payload != "" {
+		body = strings.NewReader(payload)
+	}
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		t.Fatalf("building the request: %v", err)
+	}
+	if payload != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Authorization", "Bearer "+credential(t))
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return string(body), resp.StatusCode
+	answer, _ := io.ReadAll(resp.Body)
+	return string(answer), resp.StatusCode
+}
+
+func get(t *testing.T, url string) (string, int) {
+	t.Helper()
+	return do(t, http.MethodGet, url, "", nil)
 }
 
 func post(t *testing.T, url, payload string) (string, int) {
 	t.Helper()
-	resp, err := http.Post(url, "application/json", strings.NewReader(payload))
-	if err != nil {
-		t.Fatalf("POST %s: %v", url, err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return string(body), resp.StatusCode
+	return do(t, http.MethodPost, url, payload, nil)
 }
 
 // TestIdempotencySurvivesARestart is the test the whole phase exists for.
@@ -522,18 +575,6 @@ func openWallet(t *testing.T, base, playerID, amount string) string {
 
 func submit(t *testing.T, base, key, payload string) (string, int) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, base+"/wagering/transactions", strings.NewReader(payload))
-	if err != nil {
-		t.Fatalf("building the request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", key)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("submitting: %v", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	return string(body), resp.StatusCode
+	return do(t, http.MethodPost, base+"/wagering/transactions", payload,
+		map[string]string{"Idempotency-Key": key})
 }

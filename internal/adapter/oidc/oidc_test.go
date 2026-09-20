@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -12,13 +13,21 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
+	"github.com/yvesas/wagering-core/internal/adapter/oidc/oidctest"
 	"github.com/yvesas/wagering-core/internal/app"
 )
 
-func newVerifier(t *testing.T, issuer *testIssuer) *Verifier {
+// discoveryDocument serves a discovery document a test made up, for the cases
+// where the point is that it is wrong.
+func discoveryDocument(w http.ResponseWriter, body map[string]string) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func newVerifier(t *testing.T, issuer *oidctest.Issuer) *Verifier {
 	t.Helper()
 	verifier, err := New(context.Background(), Config{
-		IssuerURL: issuer.url(),
+		IssuerURL: issuer.URL(),
 		Audience:  testAudience,
 	})
 	if err != nil {
@@ -32,7 +41,7 @@ func TestVerifyAcceptsATokenFromTheIssuer(t *testing.T) {
 	issuer := newTestIssuer(t)
 	verifier := newVerifier(t, issuer)
 
-	identity, err := verifier.Verify(context.Background(), issuer.token(t, issuer.claims()))
+	identity, err := verifier.Verify(context.Background(), mint(t, issuer, claimsFor(issuer)))
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -72,17 +81,17 @@ func TestVerifyRefusesAForgery(t *testing.T) {
 		{
 			name: "expired",
 			token: func(t *testing.T) string {
-				claims := issuer.claims()
+				claims := claimsFor(issuer)
 				claims["exp"] = time.Now().Add(-time.Hour).Unix()
-				return issuer.token(t, claims)
+				return mint(t, issuer, claims)
 			},
 		},
 		{
 			name: "not valid yet",
 			token: func(t *testing.T) string {
-				claims := issuer.claims()
+				claims := claimsFor(issuer)
 				claims["nbf"] = time.Now().Add(time.Hour).Unix()
-				return issuer.token(t, claims)
+				return mint(t, issuer, claims)
 			},
 		},
 		{
@@ -90,9 +99,9 @@ func TestVerifyRefusesAForgery(t *testing.T) {
 			// permanent credential.
 			name: "no expiry at all",
 			token: func(t *testing.T) string {
-				claims := issuer.claims()
+				claims := claimsFor(issuer)
 				delete(claims, "exp")
-				return issuer.token(t, claims)
+				return mint(t, issuer, claims)
 			},
 		},
 		{
@@ -101,23 +110,23 @@ func TestVerifyRefusesAForgery(t *testing.T) {
 			// in here.
 			name: "minted for another audience",
 			token: func(t *testing.T) string {
-				claims := issuer.claims()
+				claims := claimsFor(issuer)
 				claims["aud"] = "some-other-service"
-				return issuer.token(t, claims)
+				return mint(t, issuer, claims)
 			},
 		},
 		{
 			name: "issued by someone else",
 			token: func(t *testing.T) string {
-				claims := issuer.claims()
+				claims := claimsFor(issuer)
 				claims["iss"] = "https://issuer.example.invalid"
-				return issuer.token(t, claims)
+				return mint(t, issuer, claims)
 			},
 		},
 		{
 			name: "signed by a key the issuer never published",
 			token: func(t *testing.T) string {
-				return signWith(t, jwt.SigningMethodRS256, rogue, "key-1", issuer.claims())
+				return signWith(t, jwt.SigningMethodRS256, rogue, "key-1", claimsFor(issuer))
 			},
 		},
 		{
@@ -126,7 +135,7 @@ func TestVerifyRefusesAForgery(t *testing.T) {
 			name: "alg none",
 			token: func(t *testing.T) string {
 				return signWith(t, jwt.SigningMethodNone,
-					jwt.UnsafeAllowNoneSignatureType, "key-1", issuer.claims())
+					jwt.UnsafeAllowNoneSignatureType, "key-1", claimsFor(issuer))
 			},
 		},
 		{
@@ -135,22 +144,20 @@ func TestVerifyRefusesAForgery(t *testing.T) {
 			// secret the attacker also has.
 			name: "an hmac signed with the public key",
 			token: func(t *testing.T) string {
-				issuer.mu.Lock()
-				public := issuer.keys[issuer.signing].PublicKey.N.Bytes()
-				issuer.mu.Unlock()
-				return signWith(t, jwt.SigningMethodHS256, public, "key-1", issuer.claims())
+				return signWith(t, jwt.SigningMethodHS256,
+					issuer.PublicModulus(), "key-1", claimsFor(issuer))
 			},
 		},
 		{
 			name: "a key id that is not in the set",
 			token: func(t *testing.T) string {
-				return signWith(t, jwt.SigningMethodRS256, rogue, "key-nobody-has", issuer.claims())
+				return signWith(t, jwt.SigningMethodRS256, rogue, "key-nobody-has", claimsFor(issuer))
 			},
 		},
 		{
 			name: "no key id at all",
 			token: func(t *testing.T) string {
-				return signWith(t, jwt.SigningMethodRS256, rogue, "", issuer.claims())
+				return signWith(t, jwt.SigningMethodRS256, rogue, "", claimsFor(issuer))
 			},
 		},
 		{
@@ -162,17 +169,17 @@ func TestVerifyRefusesAForgery(t *testing.T) {
 			// provider identifier into whatever %v prints.
 			name: "a provider claim that is not a string",
 			token: func(t *testing.T) string {
-				claims := issuer.claims()
+				claims := claimsFor(issuer)
 				claims["provider_id"] = 42
-				return issuer.token(t, claims)
+				return mint(t, issuer, claims)
 			},
 		},
 		{
 			name: "no subject",
 			token: func(t *testing.T) string {
-				claims := issuer.claims()
+				claims := claimsFor(issuer)
 				delete(claims, "sub")
-				return issuer.token(t, claims)
+				return mint(t, issuer, claims)
 			},
 		},
 	}
@@ -193,11 +200,11 @@ func TestACredentialWithNoProviderIsTheInternalService(t *testing.T) {
 	issuer := newTestIssuer(t)
 	verifier := newVerifier(t, issuer)
 
-	claims := issuer.claims()
+	claims := claimsFor(issuer)
 	delete(claims, "provider_id")
 	claims["scope"] = "wallets:manage"
 
-	identity, err := verifier.Verify(context.Background(), issuer.token(t, claims))
+	identity, err := verifier.Verify(context.Background(), mint(t, issuer, claims))
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -214,12 +221,12 @@ func TestScopesArriveInEitherShape(t *testing.T) {
 	issuer := newTestIssuer(t)
 	verifier := newVerifier(t, issuer)
 
-	claims := issuer.claims()
+	claims := claimsFor(issuer)
 	delete(claims, "scope")
 	// Some issuers send an array in "scp" instead of a space-delimited string.
 	claims["scp"] = []any{"wagering:submit", 7}
 
-	identity, err := verifier.Verify(context.Background(), issuer.token(t, claims))
+	identity, err := verifier.Verify(context.Background(), mint(t, issuer, claims))
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -234,7 +241,7 @@ func TestTheKeySetIsCached(t *testing.T) {
 	verifier := newVerifier(t, issuer)
 
 	for range 5 {
-		if _, err := verifier.Verify(context.Background(), issuer.token(t, issuer.claims())); err != nil {
+		if _, err := verifier.Verify(context.Background(), mint(t, issuer, claimsFor(issuer))); err != nil {
 			t.Fatalf("Verify: %v", err)
 		}
 	}
@@ -242,7 +249,7 @@ func TestTheKeySetIsCached(t *testing.T) {
 	// One fetch for five tokens. Without the cache this endpoint would be
 	// called once per request, and the issuer would become a dependency of
 	// every single call rather than of the first one.
-	if got := issuer.jwksRequests.Load(); got != 1 {
+	if got := issuer.JWKSRequests(); got != 1 {
 		t.Fatalf("the jwks was fetched %d times, want 1", got)
 	}
 }
@@ -253,7 +260,7 @@ func TestARotatedKeyIsPickedUpWithoutARestart(t *testing.T) {
 	clock := newMovableClock()
 
 	verifier, err := New(context.Background(), Config{
-		IssuerURL: issuer.url(),
+		IssuerURL: issuer.URL(),
 		Audience:  testAudience,
 		Clock:     clock,
 	})
@@ -261,15 +268,15 @@ func TestARotatedKeyIsPickedUpWithoutARestart(t *testing.T) {
 		t.Fatalf("building the verifier: %v", err)
 	}
 
-	if _, err := verifier.Verify(context.Background(), issuer.token(t, issuer.claims())); err != nil {
+	if _, err := verifier.Verify(context.Background(), mint(t, issuer, claimsFor(issuer))); err != nil {
 		t.Fatalf("Verify before the rotation: %v", err)
 	}
 
-	issuer.rotate(t, "key-2")
+	rotate(t, issuer, "key-2")
 
 	// Straight after a fetch, an unknown key id does not send us back to the
 	// issuer: that is the floor doing its job, and it is what a rotation costs.
-	if _, err := verifier.Verify(context.Background(), issuer.token(t, issuer.claims())); err == nil {
+	if _, err := verifier.Verify(context.Background(), mint(t, issuer, claimsFor(issuer))); err == nil {
 		t.Fatal("an unknown key id refetched inside the refresh floor")
 	}
 
@@ -277,7 +284,7 @@ func TestARotatedKeyIsPickedUpWithoutARestart(t *testing.T) {
 
 	// Past the floor and still well inside the cache TTL. Refusing here would
 	// mean every rotation takes the service down until someone restarts it.
-	identity, err := verifier.Verify(context.Background(), issuer.token(t, issuer.claims()))
+	identity, err := verifier.Verify(context.Background(), mint(t, issuer, claimsFor(issuer)))
 	if err != nil {
 		t.Fatalf("Verify after the rotation: %v", err)
 	}
@@ -300,13 +307,13 @@ func TestAnUnknownKeyIdDoesNotRefetchWithoutLimit(t *testing.T) {
 	// refreshes, each one would send us to the issuer -- a free way to make
 	// this service hammer its own identity provider.
 	for range 10 {
-		token := signWith(t, jwt.SigningMethodRS256, rogue, "made-up", issuer.claims())
+		token := signWith(t, jwt.SigningMethodRS256, rogue, "made-up", claimsFor(issuer))
 		if _, err := verifier.Verify(context.Background(), token); err == nil {
 			t.Fatal("a token signed by an unpublished key was accepted")
 		}
 	}
 
-	if got := issuer.jwksRequests.Load(); got > 2 {
+	if got := issuer.JWKSRequests(); got > 2 {
 		t.Fatalf("the jwks was fetched %d times for ten unknown key ids", got)
 	}
 }
@@ -316,7 +323,7 @@ func TestAnIssuerThatIsBrieflyDownDoesNotInvalidateEveryToken(t *testing.T) {
 	issuer := newTestIssuer(t)
 
 	verifier, err := New(context.Background(), Config{
-		IssuerURL: issuer.url(),
+		IssuerURL: issuer.URL(),
 		Audience:  testAudience,
 		// Expire the cache immediately, so the next verification has to refetch
 		// and will find the issuer unreachable.
@@ -326,12 +333,12 @@ func TestAnIssuerThatIsBrieflyDownDoesNotInvalidateEveryToken(t *testing.T) {
 		t.Fatalf("building the verifier: %v", err)
 	}
 
-	token := issuer.token(t, issuer.claims())
+	token := mint(t, issuer, claimsFor(issuer))
 	if _, err := verifier.Verify(context.Background(), token); err != nil {
 		t.Fatalf("Verify while the issuer is up: %v", err)
 	}
 
-	issuer.server.Close()
+	issuer.Close()
 
 	// The keys we already hold verify this signature perfectly well. Dropping
 	// them because the issuer is unreachable would turn its outage into ours.
@@ -358,7 +365,7 @@ func TestNewRefusesAMisconfiguredIssuer(t *testing.T) {
 			// service in the realm, would be accepted here.
 			name: "no audience",
 			config: func(t *testing.T) Config {
-				return Config{IssuerURL: newTestIssuer(t).url()}
+				return Config{IssuerURL: newTestIssuer(t).URL()}
 			},
 		},
 		{
@@ -373,7 +380,7 @@ func TestNewRefusesAMisconfiguredIssuer(t *testing.T) {
 			name: "a discovery document naming another issuer",
 			config: func(t *testing.T) Config {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-					writeJSON(w, map[string]string{
+					discoveryDocument(w, map[string]string{
 						"issuer":   "https://somebody.else.invalid",
 						"jwks_uri": "https://somebody.else.invalid/jwks",
 					})
@@ -387,7 +394,7 @@ func TestNewRefusesAMisconfiguredIssuer(t *testing.T) {
 			config: func(t *testing.T) Config {
 				var server *httptest.Server
 				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-					writeJSON(w, map[string]string{"issuer": server.URL})
+					discoveryDocument(w, map[string]string{"issuer": server.URL})
 				}))
 				t.Cleanup(server.Close)
 				return Config{IssuerURL: server.URL, Audience: testAudience}
@@ -410,7 +417,7 @@ func TestClockSkewIsAllowedButNotUnbounded(t *testing.T) {
 	issuer := newTestIssuer(t)
 
 	verifier, err := New(context.Background(), Config{
-		IssuerURL: issuer.url(),
+		IssuerURL: issuer.URL(),
 		Audience:  testAudience,
 		Leeway:    time.Minute,
 	})
@@ -418,17 +425,17 @@ func TestClockSkewIsAllowedButNotUnbounded(t *testing.T) {
 		t.Fatalf("building the verifier: %v", err)
 	}
 
-	justExpired := issuer.claims()
+	justExpired := claimsFor(issuer)
 	justExpired["exp"] = time.Now().Add(-30 * time.Second).Unix()
-	if _, err := verifier.Verify(context.Background(), issuer.token(t, justExpired)); err != nil {
+	if _, err := verifier.Verify(context.Background(), mint(t, issuer, justExpired)); err != nil {
 		t.Errorf("a token inside the skew allowance was refused: %v", err)
 	}
 
-	longExpired := issuer.claims()
+	longExpired := claimsFor(issuer)
 	longExpired["exp"] = time.Now().Add(-10 * time.Minute).Unix()
 	// The allowance is for two clocks disagreeing, not for keeping dead tokens
 	// alive. A generous one is an expiry that does not expire.
-	if _, err := verifier.Verify(context.Background(), issuer.token(t, longExpired)); err == nil {
+	if _, err := verifier.Verify(context.Background(), mint(t, issuer, longExpired)); err == nil {
 		t.Error("a token ten minutes past its expiry was accepted")
 	}
 }
