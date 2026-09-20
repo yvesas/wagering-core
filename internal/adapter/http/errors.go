@@ -106,6 +106,19 @@ func statusFor(err error) (int, string) {
 	}
 
 	switch {
+	case errors.Is(err, app.ErrUnauthenticated):
+		// Reachable from a use case rather than from the middleware, which
+		// answers its own 401 with the challenge header. Getting here means a
+		// port called a use case without establishing a caller -- the
+		// fail-closed path in identity.go -- and 401 is still the right answer.
+		return http.StatusUnauthorized, "UNAUTHENTICATED"
+	case errors.Is(err, app.ErrForbidden):
+		// The caller is known and this is not theirs to do. Only ever used
+		// where saying so reveals nothing: a scope the client's own token
+		// lacks, or an operation it tried to submit under someone else's name.
+		// Reading someone else's operation answers 404 instead, from the use
+		// case -- see queries.go.
+		return http.StatusForbidden, "FORBIDDEN"
 	case errors.Is(err, app.ErrNotFound):
 		return http.StatusNotFound, "NOT_FOUND"
 	case errors.Is(err, app.ErrConflict):

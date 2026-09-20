@@ -17,26 +17,55 @@ import (
 	"github.com/yvesas/wagering-core/internal/app"
 )
 
-// Routes builds the mux.
+// route is one endpoint, and whether it can be reached without a credential.
+//
+// The zero value of public is false, so an entry added to the table below is
+// authenticated unless someone writes down that it should not be. A list of
+// public paths consulted by a middleware would default the other way, and the
+// day someone adds an endpoint and forgets, the mistake would be an open one.
+type route struct {
+	pattern string
+	handler http.HandlerFunc
+
+	// public means the endpoint answers without a credential. Only the health
+	// probes are: a load balancer has no token, and the answer is one word
+	// about this process -- see health.go for what it deliberately omits.
+	public bool
+}
+
+// routeTable is the whole surface of this service, in one place a person can
+// read and a test can walk.
+func routeTable(wallets *WalletHandler, transactions *TransactionHandler, health *HealthHandler) []route {
+	return []route{
+		{pattern: "POST /wallets", handler: wallets.Open},
+		{pattern: "GET /wallets/{walletId}", handler: wallets.Get},
+		{pattern: "GET /wallets/{walletId}/ledger", handler: wallets.Ledger},
+
+		{pattern: "POST /wagering/transactions", handler: transactions.Submit},
+		{pattern: "GET /wagering/transactions/{transactionId}", handler: transactions.Get},
+		{pattern: "GET /providers/{providerId}/wagering/transactions/{externalTransactionId}", handler: transactions.GetByProvider},
+
+		{pattern: "GET /health/live", handler: health.Live, public: true},
+		{pattern: "GET /health/ready", handler: health.Ready, public: true},
+	}
+}
+
+// Routes builds the mux, wrapping every non-public route in authentication.
 //
 // Patterns carry their method, so an unregistered method on a known path
 // answers 405 with an Allow header and no code of ours. Specificity decides
 // between overlapping patterns, so the order here is for a reader, not for the
 // router.
-func Routes(wallets *WalletHandler, transactions *TransactionHandler, health *HealthHandler) *http.ServeMux {
+func Routes(auth *Authenticator, wallets *WalletHandler, transactions *TransactionHandler, health *HealthHandler) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /wallets", wallets.Open)
-	mux.HandleFunc("GET /wallets/{walletId}", wallets.Get)
-	mux.HandleFunc("GET /wallets/{walletId}/ledger", wallets.Ledger)
-
-	mux.HandleFunc("POST /wagering/transactions", transactions.Submit)
-	mux.HandleFunc("GET /wagering/transactions/{transactionId}", transactions.Get)
-	mux.HandleFunc("GET /providers/{providerId}/wagering/transactions/{externalTransactionId}", transactions.GetByProvider)
-
-	mux.HandleFunc("GET /health/live", health.Live)
-	mux.HandleFunc("GET /health/ready", health.Ready)
-
+	for _, rt := range routeTable(wallets, transactions, health) {
+		handler := rt.handler
+		if !rt.public {
+			handler = auth.require(handler)
+		}
+		mux.HandleFunc(rt.pattern, handler)
+	}
 	return mux
 }
 
