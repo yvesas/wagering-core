@@ -1,7 +1,13 @@
 # Regra — CI e minuto de Actions
 
-> Enforçada por: o próprio workflow (`concurrency`, guarda de diff,
-> `timeout-minutes`), o checklist do `/pr` e code review.
+> Enforçada por: **`.github/workflows/check.yml`**, que existe desde a fase 10 e
+> aplica o que está escrito abaixo — `concurrency` com cancelamento,
+> `timeout-minutes` em todo job, guarda de diff por step e `services:` só no job
+> de integração. O checklist do `/pr` e o code review cobrem o resto.
+>
+> Até a fase 10 esta regra descrevia um workflow que não existia, o que é
+> exatamente o que D-010 evitou no `domain-check`: regra que não roda vira
+> recomendação. Agora ela roda.
 >
 > Não há hook para isto, e é uma limitação real: minuto gasto não aparece no
 > diff. Quem vê é a fatura, um mês depois, quando não dá mais para desfazer.

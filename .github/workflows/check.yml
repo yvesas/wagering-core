@@ -1,0 +1,175 @@
+name: check
+
+# Pull requests only.
+#
+# Squash is the merge strategy, so the commit that lands on main is the content
+# of a branch whose checks already passed. Running again on push would test the
+# same tree twice and pay for it twice. The day a merge goes wrong, the next PR
+# finds it -- it rebases onto that main.
+on:
+  pull_request:
+    # ready_for_review is not a default type. Without it, marking a draft as
+    # ready triggers no run at all, and a required check that never arrives is
+    # a PR that waits forever.
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# Iterating on a branch leaves three or four full runs racing to talk about
+# commits nobody will merge, and only the newest answer is read.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: gate
+    runs-on: ubuntu-latest
+    # A draft costs the same as anything else unless it is barred here: being a
+    # draft does not stop a workflow on its own.
+    if: github.event.pull_request.draft == false
+    # The default is 360 minutes. A job waiting on stdin would burn six hours
+    # of quota by itself, and that is the biggest surprise on a bill.
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # without history there is no diff against the base
+
+      - uses: actions/setup-go@v5
+        with:
+          # One source for the version. A second declaration here drifts, and
+          # then CI tests a Go nobody runs.
+          go-version-file: go.mod
+          cache: true
+
+      - name: What the diff touched
+        id: touched
+        run: |
+          git fetch --no-tags origin "${{ github.base_ref }}"
+
+          # core.quotePath=false, or git returns accented paths escaped --
+          # "docs/decis\303\243o.md" -- which never matches ^docs/. It would err
+          # towards running everything, but it would silently disable the guard
+          # in a repository whose prose is in Portuguese.
+          changed=$(git -c core.quotePath=false diff --name-only \
+            "origin/${{ github.base_ref }}"...HEAD || true)
+
+          # Silence means the diff failed, not that nothing changed. A guard
+          # that cannot read the request does not know what to skip, so the safe
+          # side of being wrong here is running everything.
+          if [ -z "$changed" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          # The file list, never grep's exit status: -q with -v does not mean
+          # the same thing in every grep, and the implementations disagree on
+          # exactly the mixed pull request this guard exists to get right.
+          code=$(echo "$changed" | grep -vE '^(docs/|specs/|README\.md|\.github/ISSUE)' || true)
+
+          if [ -n "$code" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Seconds, and it catches an unformatted file that reached main more than
+      # once. It runs even for a documentation-only change.
+      - name: Formatting
+        run: make fmt-check
+
+      - name: Dependencies
+        if: steps.touched.outputs.code == 'true'
+        # Separately from the build, so a dependency failure reads as one
+        # instead of as a compile error three hundred lines down.
+        run: go mod download
+
+      - name: Gate
+        if: steps.touched.outputs.code == 'true'
+        # vet, the two import guards, the unit tests and the race detector.
+        run: make check
+
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    # The scenarios build the server and run three instances of it against a
+    # real database; locally the whole thing takes about four minutes.
+    timeout-minutes: 25
+
+    # Declared here and nowhere else. `services:` starts a container in every
+    # job that names it, including the ones that never open a connection.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: wagering_test
+          POSTGRES_USER: wagering
+          POSTGRES_PASSWORD: local-dev-only
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U wagering -d wagering_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+      localstack:
+        image: localstack/localstack:3.8
+        env:
+          SERVICES: sqs
+          DEBUG: 0
+          AWS_DEFAULT_REGION: us-east-1
+        ports:
+          - 4567:4566
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health | grep -q '\"sqs\": \"available\"'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: What the diff touched
+        id: touched
+        run: |
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          changed=$(git -c core.quotePath=false diff --name-only \
+            "origin/${{ github.base_ref }}"...HEAD || true)
+          if [ -z "$changed" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          code=$(echo "$changed" | grep -vE '^(docs/|specs/|README\.md|\.github/ISSUE)' || true)
+          if [ -n "$code" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Integration and scenarios
+        if: steps.touched.outputs.code == 'true'
+        env:
+          # The tests default to these, and setting them here is what makes the
+          # job readable without opening the Go source.
+          TEST_DB_HOST: localhost
+          TEST_DB_PORT: 5433
+          TEST_DB_NAME: wagering_test
+          TEST_DB_USER: wagering
+          TEST_DB_PASSWORD: local-dev-only
+          TEST_QUEUE_ENDPOINT: http://localhost:4567
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+        # The identity provider is not here: these tests start one in process,
+        # sign with a key generated on the spot, and serve its key set
+        # themselves. Keycloak is for running the thing by hand.
+        run: make test-integration
