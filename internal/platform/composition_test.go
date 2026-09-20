@@ -258,9 +258,15 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func credential(t *testing.T) string {
+// credentialFor mints a token that acts for a provider and carries every scope.
+//
+// Every scope on purpose: these tests are about composition -- that the whole
+// thing stands up, serves and shuts down -- so a missing scope would fail them
+// for a reason that has nothing to do with what they assert. Who may do what is
+// proved in internal/app, against the use cases that decide it.
+func credentialFor(t *testing.T, providerID string) string {
 	t.Helper()
-	token, err := issuer.Token(issuer.Claims("provider-a",
+	token, err := issuer.Token(issuer.Claims(providerID,
 		"wagering:submit", "wagering:read", "wallets:manage"))
 	if err != nil {
 		t.Fatalf("minting a token: %v", err)
@@ -268,7 +274,12 @@ func credential(t *testing.T) string {
 	return token
 }
 
-func do(t *testing.T, method, url, payload string, headers map[string]string) (string, int) {
+func credential(t *testing.T) string {
+	t.Helper()
+	return credentialFor(t, "provider-a")
+}
+
+func do(t *testing.T, method, url, token, payload string, headers map[string]string) (string, int) {
 	t.Helper()
 
 	var body io.Reader
@@ -282,7 +293,7 @@ func do(t *testing.T, method, url, payload string, headers map[string]string) (s
 	if payload != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("Authorization", "Bearer "+credential(t))
+	req.Header.Set("Authorization", "Bearer "+token)
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
@@ -298,12 +309,12 @@ func do(t *testing.T, method, url, payload string, headers map[string]string) (s
 
 func get(t *testing.T, url string) (string, int) {
 	t.Helper()
-	return do(t, http.MethodGet, url, "", nil)
+	return do(t, http.MethodGet, url, credential(t), "", nil)
 }
 
 func post(t *testing.T, url, payload string) (string, int) {
 	t.Helper()
-	return do(t, http.MethodPost, url, payload, nil)
+	return do(t, http.MethodPost, url, credential(t), payload, nil)
 }
 
 // TestIdempotencySurvivesARestart is the test the whole phase exists for.
@@ -573,8 +584,25 @@ func openWallet(t *testing.T, base, playerID, amount string) string {
 	return created.ID
 }
 
+// submit sends an operation under the credential of the provider the operation
+// itself names.
+//
+// The provider is read out of the payload rather than passed alongside it. The
+// two have to agree -- the token is the authority over providerId and a
+// disagreement is a 403 -- and a second copy of the string in every call is a
+// second copy to get out of step. These tests give each run its own provider so
+// their rows cannot collide with an earlier one's.
 func submit(t *testing.T, base, key, payload string) (string, int) {
 	t.Helper()
-	return do(t, http.MethodPost, base+"/wagering/transactions", payload,
+
+	var operation struct {
+		ProviderID string `json:"providerId"`
+	}
+	if err := json.Unmarshal([]byte(payload), &operation); err != nil {
+		t.Fatalf("reading the provider out of %s: %v", payload, err)
+	}
+
+	return do(t, http.MethodPost, base+"/wagering/transactions",
+		credentialFor(t, operation.ProviderID), payload,
 		map[string]string{"Idempotency-Key": key})
 }
