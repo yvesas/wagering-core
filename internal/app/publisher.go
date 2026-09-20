@@ -14,15 +14,17 @@ type Publisher struct {
 	publisher EventPublisher
 	clock     Clock
 	policy    PublisherPolicy
+	metrics   OutboxMetrics
 	logger    *slog.Logger
 }
 
-func NewPublisher(uow UnitOfWork, publisher EventPublisher, clock Clock, policy PublisherPolicy, logger *slog.Logger) *Publisher {
+func NewPublisher(uow UnitOfWork, publisher EventPublisher, clock Clock, policy PublisherPolicy, metrics OutboxMetrics, logger *slog.Logger) *Publisher {
 	return &Publisher{
 		uow:       uow,
 		publisher: publisher,
 		clock:     clock,
 		policy:    policy.normalised(),
+		metrics:   outboxMetricsOr(metrics),
 		logger:    logger,
 	}
 }
@@ -92,6 +94,7 @@ func (p *Publisher) publishOne(ctx context.Context, repos Repositories, record O
 			slog.String("eventType", string(record.Event.Type)),
 			slog.Int("attempts", record.Attempts+1),
 			slog.String("error", err.Error()))
+		p.metrics.EventPublishFailed()
 
 		return repos.Outbox().Reschedule(ctx, record.EventID,
 			p.nextAttemptAt(now, record.Attempts+1), err.Error())
@@ -103,6 +106,15 @@ func (p *Publisher) publishOne(ctx context.Context, repos Repositories, record O
 	if err := repos.Outbox().MarkPublished(ctx, record.EventID, now); err != nil {
 		return err
 	}
+
+	// How long the event waited between being recorded and going out. This is
+	// the number that says whether the outbox is keeping up, and a queue depth
+	// would not: a stuck publisher and an idle one both leave an empty queue.
+	//
+	// It is measured from when the fact happened, not from when this pass
+	// picked the row up. The second would report how fast we publish what we
+	// chose to publish, which is a question nobody is asking.
+	p.metrics.EventPublished(now.Sub(record.Event.OccurredAt))
 	return nil
 }
 

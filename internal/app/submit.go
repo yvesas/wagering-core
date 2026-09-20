@@ -42,9 +42,10 @@ type SubmitTransaction struct {
 	clock   Clock
 	waiting ReferencePolicy
 	events  eventRecorder
+	metrics OperationMetrics
 }
 
-func NewSubmitTransaction(uow UnitOfWork, queries Queries, ids IDGenerator, clock Clock, waiting ReferencePolicy) *SubmitTransaction {
+func NewSubmitTransaction(uow UnitOfWork, queries Queries, ids IDGenerator, clock Clock, waiting ReferencePolicy, metrics OperationMetrics) *SubmitTransaction {
 	return &SubmitTransaction{
 		uow:     uow,
 		queries: queries,
@@ -52,6 +53,7 @@ func NewSubmitTransaction(uow UnitOfWork, queries Queries, ids IDGenerator, cloc
 		clock:   clock,
 		waiting: waiting.normalised(),
 		events:  newEventRecorder(ids, clock),
+		metrics: operationMetricsOr(metrics),
 	}
 }
 
@@ -62,6 +64,46 @@ func NewSubmitTransaction(uow UnitOfWork, queries Queries, ids IDGenerator, cloc
 // docs/adr/0009-inbox-and-queue.md. Both go through the same code below, so
 // there is no queue version of the rules and no HTTP version of them.
 func (uc *SubmitTransaction) Execute(ctx context.Context, cmd SubmitCommand) (SubmitResult, error) {
+	started := time.Now()
+	result, err := uc.execute(ctx, cmd)
+	uc.Record(SourceHTTP, time.Since(started), result, err)
+	return result, err
+}
+
+// Record puts one settled operation on the meters.
+//
+// It is exported because the queue is an entry port too and records the same
+// things with a different source. The alternative -- recording inside the code
+// both ports share -- would need the source to travel down there, and the
+// source is a property of the port, which is the one thing the shared code
+// deliberately does not know.
+//
+// The elapsed time comes from time.Now and not from the Clock port. The clock
+// exists so a business timestamp is decided by the caller rather than by the
+// machine; a duration on a histogram is a measurement, and reading it from a
+// movable test clock would make every observation zero.
+func (uc *SubmitTransaction) Record(source string, took time.Duration, result SubmitResult, err error) {
+	uc.metrics.OperationLatency(source, took)
+
+	if err != nil {
+		// Contention that the retry could not absorb and that reached the
+		// caller. The retries themselves are counted by the unit of work, so
+		// the two together say how much of the contention was hidden.
+		if errors.Is(err, ErrVersionMismatch) {
+			uc.metrics.WalletContention()
+		}
+		return
+	}
+
+	// Kind and status are closed sets from the domain, which is what keeps this
+	// label pair bounded. A rejection is an outcome like any other and is
+	// counted here, not as an error: that is the whole point of recording the
+	// refusal rather than returning it.
+	uc.metrics.OperationSettled(source,
+		string(result.Transaction.Kind()), string(result.Transaction.Status()))
+}
+
+func (uc *SubmitTransaction) execute(ctx context.Context, cmd SubmitCommand) (SubmitResult, error) {
 	var result SubmitResult
 
 	err := uc.uow.Do(ctx, func(ctx context.Context, repos Repositories) error {

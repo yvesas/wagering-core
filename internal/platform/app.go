@@ -17,6 +17,11 @@ type AppConfig struct {
 
 	DBMaxConns int32
 
+	// MetricsAddr is where the exposition endpoint listens. It is a second
+	// listener on purpose -- see docs/adr/0012 -- and the port is not published
+	// outside the local network, so the scraper needs no credential.
+	MetricsAddr string
+
 	// How long a reversal waits for the operation it undoes.
 	ReferenceMaxAttempts int
 	ReferenceBaseBackoff time.Duration
@@ -47,8 +52,9 @@ type AppConfig struct {
 // a local run work with nothing set.
 func AppConfigFromEnv() (AppConfig, error) {
 	cfg := AppConfig{
-		Env:      envOr("APP_ENV", "local"),
-		HTTPAddr: envOr("APP_HTTP_ADDR", ":8080"),
+		Env:         envOr("APP_ENV", "local"),
+		HTTPAddr:    envOr("APP_HTTP_ADDR", ":8080"),
+		MetricsAddr: envOr("APP_METRICS_ADDR", ":9090"),
 	}
 
 	var err error

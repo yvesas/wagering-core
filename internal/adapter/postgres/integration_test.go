@@ -240,7 +240,7 @@ func externalTx(t *testing.T, walletID domain.WalletID, playerID domain.PlayerID
 // --- wallets ---------------------------------------------------------------
 
 func TestWalletRoundTrip(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	queries := NewQueries(testPool)
 	opening, tx := newOpening(t, "1000.00")
 	persistOpening(t, uow, opening, tx)
@@ -276,7 +276,7 @@ func TestWalletNotFound(t *testing.T) {
 }
 
 func TestSecondWalletForTheSamePlayerAndCurrencyConflicts(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	opening, tx := newOpening(t, "100.00")
 	persistOpening(t, uow, opening, tx)
 
@@ -314,7 +314,7 @@ func TestSecondWalletForTheSamePlayerAndCurrencyConflicts(t *testing.T) {
 }
 
 func TestUpdateBalanceHonoursTheVersion(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	opening, tx := newOpening(t, "100.00")
 	persistOpening(t, uow, opening, tx)
 
@@ -382,7 +382,7 @@ func TestUpdateBalanceHonoursTheVersion(t *testing.T) {
 }
 
 func TestDatabaseRefusesANegativeBalance(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	opening, tx := newOpening(t, "10.00")
 	persistOpening(t, uow, opening, tx)
 
@@ -401,7 +401,7 @@ func TestDatabaseRefusesANegativeBalance(t *testing.T) {
 // --- ledger ----------------------------------------------------------------
 
 func TestLedgerIsAppendOnlyInTheDatabase(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	opening, tx := newOpening(t, "100.00")
 	persistOpening(t, uow, opening, tx)
 
@@ -431,7 +431,7 @@ func TestLedgerIsAppendOnlyInTheDatabase(t *testing.T) {
 }
 
 func TestLedgerRefusesASecondEntryForTheSameTransaction(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	opening, tx := newOpening(t, "100.00")
 	persistOpening(t, uow, opening, tx)
 
@@ -468,7 +468,7 @@ func TestLedgerRefusesASecondEntryForTheSameTransaction(t *testing.T) {
 }
 
 func TestDatabaseRefusesBrokenLedgerArithmetic(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	opening, tx := newOpening(t, "100.00")
 	persistOpening(t, uow, opening, tx)
 
@@ -485,7 +485,7 @@ func TestDatabaseRefusesBrokenLedgerArithmetic(t *testing.T) {
 }
 
 func TestLedgerPaginationIsStable(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	opening, openingTx := newOpening(t, "1000.00")
 	persistOpening(t, uow, opening, openingTx)
 
@@ -556,7 +556,7 @@ func TestLedgerPaginationIsStable(t *testing.T) {
 }
 
 func TestStoredBalanceMatchesTheLedgerSum(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	opening, openingTx := newOpening(t, "100.00")
 	persistOpening(t, uow, opening, openingTx)
 
@@ -628,7 +628,7 @@ func TestStoredBalanceMatchesTheLedgerSum(t *testing.T) {
 // --- transactions ----------------------------------------------------------
 
 func TestTransactionRoundTrip(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	queries := NewQueries(testPool)
 	opening, openingTx := newOpening(t, "100.00")
 	persistOpening(t, uow, opening, openingTx)
@@ -660,7 +660,7 @@ func TestTransactionRoundTrip(t *testing.T) {
 }
 
 func TestDatabaseRefusesAnExternalOpening(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	opening, openingTx := newOpening(t, "100.00")
 	persistOpening(t, uow, opening, openingTx)
 
@@ -683,7 +683,7 @@ func TestDatabaseRefusesAnExternalOpening(t *testing.T) {
 }
 
 func TestDatabaseRefusesASecondOpeningForAWallet(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	opening, openingTx := newOpening(t, "100.00")
 	persistOpening(t, uow, opening, openingTx)
 
@@ -712,7 +712,7 @@ func TestDatabaseRefusesASecondOpeningForAWallet(t *testing.T) {
 }
 
 func TestDuplicateIdempotencyKeyConflicts(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	opening, openingTx := newOpening(t, "100.00")
 	persistOpening(t, uow, opening, openingTx)
 
@@ -760,7 +760,7 @@ func TestDuplicateIdempotencyKeyConflicts(t *testing.T) {
 }
 
 func TestUpdateRefusesToMoveATerminalTransaction(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	opening, openingTx := newOpening(t, "100.00")
 	persistOpening(t, uow, opening, openingTx)
 
@@ -809,7 +809,7 @@ func TestUpdateRefusesToMoveATerminalTransaction(t *testing.T) {
 // --- unit of work ----------------------------------------------------------
 
 func TestUnitOfWorkCommitsEverythingTogether(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	opening, tx := newOpening(t, "500.00")
 	persistOpening(t, uow, opening, tx)
 
@@ -828,7 +828,7 @@ func TestUnitOfWorkCommitsEverythingTogether(t *testing.T) {
 }
 
 func TestUnitOfWorkRollsBackEverythingOnError(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	opening, tx := newOpening(t, "500.00")
 
 	sentinel := errors.New("the use case changed its mind")
@@ -867,7 +867,7 @@ func TestUnitOfWorkRollsBackEverythingOnError(t *testing.T) {
 }
 
 func TestUnitOfWorkRollsBackOnPanicAndRepropagates(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	opening, tx := newOpening(t, "500.00")
 
 	func() {
@@ -891,7 +891,7 @@ func TestUnitOfWorkRollsBackOnPanicAndRepropagates(t *testing.T) {
 }
 
 func TestNestedUnitOfWorkIsRefused(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 
 	err := uow.Do(context.Background(), func(ctx context.Context, _ app.Repositories) error {
 		// Opening a savepoint quietly here is how "transaction" stops meaning
@@ -904,7 +904,7 @@ func TestNestedUnitOfWorkIsRefused(t *testing.T) {
 }
 
 func TestRepositoriesSeeTheirOwnUncommittedWrites(t *testing.T) {
-	uow := NewUnitOfWork(testPool)
+	uow := NewUnitOfWork(testPool, nil)
 	opening, tx := newOpening(t, "100.00")
 
 	// Read-your-writes inside the transaction is what makes a use case able to

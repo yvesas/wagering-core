@@ -13,9 +13,10 @@ import (
 func testMux(t *testing.T, verifier TokenVerifier) http.Handler {
 	t.Helper()
 	return Handler(Routes(
-		NewAuthenticator(verifier),
+		NewAuthenticator(verifier), nil,
 		NewWalletHandler(&stubOpener{}, &stubReader{}),
 		NewTransactionHandler(&stubSubmitter{}, &stubTxReader{}),
+		NewReconciliationHandler(&stubReconciler{}),
 		NewHealthHandler(),
 	))
 }
@@ -33,6 +34,7 @@ func TestEveryBusinessRouteRequiresACredential(t *testing.T) {
 	for _, rt := range routeTable(
 		NewWalletHandler(&stubOpener{}, &stubReader{}),
 		NewTransactionHandler(&stubSubmitter{}, &stubTxReader{}),
+		NewReconciliationHandler(&stubReconciler{}),
 		NewHealthHandler(),
 	) {
 		t.Run(rt.pattern, func(t *testing.T) {
@@ -147,9 +149,10 @@ func TestTheIdentityReachesTheUseCase(t *testing.T) {
 	}}
 
 	mux := Handler(Routes(
-		testAuth(t),
+		testAuth(t), nil,
 		NewWalletHandler(opener, &stubReader{}),
 		NewTransactionHandler(&stubSubmitter{}, &stubTxReader{}),
+		NewReconciliationHandler(&stubReconciler{}),
 		NewHealthHandler(),
 	))
 

@@ -25,6 +25,10 @@ type submitFixture struct {
 	wallet domain.Wallet
 	clock  *movableClock
 
+	// metrics is what the fixture recorded, so a test can assert on the numbers
+	// an operator would see.
+	metrics *recordingMetrics
+
 	// ids is the fixture's own generator. A second one would start over and
 	// mint identifiers this store already holds.
 	ids *fakeIDs
@@ -40,6 +44,8 @@ func newSubmitFixture(t *testing.T, balance string) submitFixture {
 	uow := &memoryUnitOfWork{store: store}
 	queries := &memoryQueries{store: store}
 
+	recorder := newRecordingMetrics()
+
 	wallet, err := NewOpenWallet(uow, ids, clock).Execute(callerContext(), OpenWalletCommand{
 		PlayerID: "player-1",
 		Amount:   balance,
@@ -50,11 +56,12 @@ func newSubmitFixture(t *testing.T, balance string) submitFixture {
 	}
 
 	return submitFixture{
-		submit: NewSubmitTransaction(uow, queries, ids, clock, testReferencePolicy),
-		store:  store,
-		wallet: wallet,
-		clock:  clock,
-		ids:    ids,
+		submit:  NewSubmitTransaction(uow, queries, ids, clock, testReferencePolicy, recorder),
+		store:   store,
+		wallet:  wallet,
+		clock:   clock,
+		ids:     ids,
+		metrics: recorder,
 	}
 }
 
@@ -340,7 +347,7 @@ func TestIdempotencyDoesNotDependOnProcessMemory(t *testing.T) {
 		&memoryQueries{store: f.store},
 		&fakeIDs{},
 		f.clock,
-		testReferencePolicy,
+		testReferencePolicy, newRecordingMetrics(),
 	)
 
 	replay, err := restarted.Execute(callerContext(), cmd)

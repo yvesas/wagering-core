@@ -50,19 +50,30 @@ func (p RetryPolicy) normalised() RetryPolicy {
 
 // unitOfWork runs a callback inside one transaction.
 type unitOfWork struct {
-	pool  *pgxpool.Pool
-	retry RetryPolicy
+	pool    *pgxpool.Pool
+	retry   RetryPolicy
+	metrics app.StorageMetrics
 }
 
 // NewUnitOfWork builds the transactional boundary over a pool.
-func NewUnitOfWork(pool *pgxpool.Pool) app.UnitOfWork {
-	return &unitOfWork{pool: pool, retry: DefaultRetryPolicy}
+//
+// The recorder may be nil, and a test passes nil: a metric that panicked would
+// take down a financial write in order to report that the write happened.
+func NewUnitOfWork(pool *pgxpool.Pool, metrics app.StorageMetrics) app.UnitOfWork {
+	return newUnitOfWork(pool, DefaultRetryPolicy, metrics)
 }
 
 // NewUnitOfWorkWithRetry is the same thing with an explicit policy, so a test
 // can make the retry observable instead of inferring it from timing.
-func NewUnitOfWorkWithRetry(pool *pgxpool.Pool, policy RetryPolicy) app.UnitOfWork {
-	return &unitOfWork{pool: pool, retry: policy.normalised()}
+func NewUnitOfWorkWithRetry(pool *pgxpool.Pool, policy RetryPolicy, metrics app.StorageMetrics) app.UnitOfWork {
+	return newUnitOfWork(pool, policy.normalised(), metrics)
+}
+
+func newUnitOfWork(pool *pgxpool.Pool, policy RetryPolicy, metrics app.StorageMetrics) app.UnitOfWork {
+	if metrics == nil {
+		metrics = app.NoMetrics{}
+	}
+	return &unitOfWork{pool: pool, retry: policy, metrics: metrics}
 }
 
 // insideUnitOfWork marks a context that is already inside a transaction.
@@ -99,6 +110,10 @@ func (u *unitOfWork) Do(ctx context.Context, fn func(context.Context, app.Reposi
 		if err == nil || !transient(err) || attempt >= policy.MaxAttempts {
 			return err
 		}
+		// Counted before the wait, so the number is "attempts we replayed"
+		// rather than "attempts that got as far as running again".
+		u.metrics.TransactionRetried()
+
 		if waitErr := backoff(ctx, policy, attempt); waitErr != nil {
 			// The caller went away while we were waiting. Reporting why the
 			// attempt failed is more useful than reporting the cancellation.
@@ -183,13 +198,18 @@ func (r *repositories) Inbox() app.InboxRepository   { return &inboxRepository{q
 func (r *repositories) Outbox() app.OutboxRepository { return &outboxRepository{q: r.q} }
 
 // queries is read-only access straight to the pool.
+// queries is the read-only side, bound to whatever can run a statement.
+//
+// It holds a querier rather than a pool so the same reads work against a
+// transaction: that is what lets [NewSnapshot] hand the use case one unchanging
+// view without a second set of read repositories.
 type queries struct {
-	pool *pgxpool.Pool
+	q querier
 }
 
 // NewQueries builds the read-only side, for lookups that do not need atomicity.
-func NewQueries(pool *pgxpool.Pool) app.Queries { return &queries{pool: pool} }
+func NewQueries(pool *pgxpool.Pool) app.Queries { return &queries{q: pool} }
 
-func (q *queries) Wallets() app.WalletReader           { return &walletRepository{q: q.pool} }
-func (q *queries) Ledger() app.LedgerReader            { return &ledgerRepository{q: q.pool} }
-func (q *queries) Transactions() app.TransactionReader { return &transactionRepository{q: q.pool} }
+func (q *queries) Wallets() app.WalletReader           { return &walletRepository{q: q.q} }
+func (q *queries) Ledger() app.LedgerReader            { return &ledgerRepository{q: q.q} }
+func (q *queries) Transactions() app.TransactionReader { return &transactionRepository{q: q.q} }

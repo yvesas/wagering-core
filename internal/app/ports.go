@@ -139,6 +139,27 @@ type Queries interface {
 	Transactions() TransactionReader
 }
 
+// Snapshot runs fn against one unchanging view of the database.
+//
+// It is not [UnitOfWork] with the writes taken away, and the difference is the
+// point. A plain transaction at the default isolation level gives each
+// *statement* its own snapshot, so two reads inside one transaction can see two
+// different states -- which is exactly the hole reconciliation would fall into:
+// read the balance, have a bet commit, read the ledger, and report a difference
+// that never existed.
+//
+// The adapter opens this read-only and at an isolation level where the whole
+// transaction sees one snapshot. Read-only because reconciliation must not
+// change anything, and saying so to the database is stronger than saying so in
+// a comment.
+//
+// It is deliberately separate from UnitOfWork rather than an option on it: the
+// two have different guarantees, and a boolean argument would let a caller ask
+// for the wrong one without noticing.
+type Snapshot interface {
+	Do(ctx context.Context, fn func(context.Context, Queries) error) error
+}
+
 // UnitOfWork runs fn inside a single database transaction.
 //
 // A non-nil error from fn rolls back; nil commits; a panic rolls back and is
