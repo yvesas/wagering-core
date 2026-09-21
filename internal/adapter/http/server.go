@@ -10,6 +10,8 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,11 +37,12 @@ type route struct {
 
 // routeTable is the whole surface of this service, in one place a person can
 // read and a test can walk.
-func routeTable(wallets *WalletHandler, transactions *TransactionHandler, health *HealthHandler) []route {
+func routeTable(wallets *WalletHandler, transactions *TransactionHandler, reconciliation *ReconciliationHandler, health *HealthHandler) []route {
 	return []route{
 		{pattern: "POST /wallets", handler: wallets.Open},
 		{pattern: "GET /wallets/{walletId}", handler: wallets.Get},
 		{pattern: "GET /wallets/{walletId}/ledger", handler: wallets.Ledger},
+		{pattern: "POST /wallets/{walletId}/reconciliation", handler: reconciliation.Check},
 
 		{pattern: "POST /wagering/transactions", handler: transactions.Submit},
 		{pattern: "GET /wagering/transactions/{transactionId}", handler: transactions.Get},
@@ -56,17 +59,61 @@ func routeTable(wallets *WalletHandler, transactions *TransactionHandler, health
 // answers 405 with an Allow header and no code of ours. Specificity decides
 // between overlapping patterns, so the order here is for a reader, not for the
 // router.
-func Routes(auth *Authenticator, wallets *WalletHandler, transactions *TransactionHandler, health *HealthHandler) *http.ServeMux {
+func Routes(auth *Authenticator, observer RequestObserver, wallets *WalletHandler, transactions *TransactionHandler, reconciliation *ReconciliationHandler, health *HealthHandler) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	for _, rt := range routeTable(wallets, transactions, health) {
+	for _, rt := range routeTable(wallets, transactions, reconciliation, health) {
 		handler := rt.handler
 		if !rt.public {
 			handler = auth.require(handler)
 		}
-		mux.HandleFunc(rt.pattern, handler)
+		// Outside the authentication, so a refused request is timed too: a 401
+		// is a request that cost something, and a spike of them is exactly the
+		// shape an incident has.
+		mux.HandleFunc(rt.pattern, observe(observer, rt.pattern, handler))
 	}
 	return mux
+}
+
+// RequestObserver times one request. Declared here, by the code that calls it,
+// so the edge depends on one method rather than on a metrics library.
+type RequestObserver interface {
+	RequestObserved(route, method, status string, took time.Duration)
+}
+
+// observe times a handler and labels it with the pattern it was registered
+// under.
+//
+// The pattern comes from the route table, not from the request. A path carries
+// wallet ids and transaction ids, and one time series per wallet is how a
+// metrics backend is taken down by the instrumentation meant to watch it. The
+// table is a closed list, so the label is bounded by construction rather than
+// by a sanitiser someone has to remember to update.
+func observe(observer RequestObserver, pattern string, next http.HandlerFunc) http.HandlerFunc {
+	if observer == nil {
+		return next
+	}
+
+	// The method is already in the pattern -- "POST /wallets" -- so the route
+	// label is split off it rather than read from the request, which keeps the
+	// two in step.
+	method, path, found := strings.Cut(pattern, " ")
+	if !found {
+		method, path = "", pattern
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		recorder := &statusRecorder{ResponseWriter: w}
+
+		next(recorder, r)
+
+		if recorder.status == 0 {
+			recorder.status = http.StatusOK
+		}
+		observer.RequestObserved(path, method,
+			strconv.Itoa(recorder.status), time.Since(started))
+	}
 }
 
 // Handler wraps the mux in the middleware chain.

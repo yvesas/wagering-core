@@ -37,6 +37,12 @@ const instances = 3
 type cluster struct {
 	bases []string
 
+	// metrics is the exposition endpoint of each instance, on a port of its
+	// own. Three processes sharing the default one would fight over it, and the
+	// second would fail to start for a reason that has nothing to do with what
+	// is under test.
+	metrics []string
+
 	// stop shuts each instance down. Calling it twice is safe, so a test can
 	// stop the cluster explicitly and the cleanup can still run.
 	stop []func()
@@ -136,8 +142,9 @@ func startClusterWith(t *testing.T, overrides map[string]string) cluster {
 	var c cluster
 	for i := 0; i < instances; i++ {
 		addr := freePort(t)
+		metricsAddr := freePort(t)
 		cmd := exec.Command(binary)
-		cmd.Env = append(env, "APP_HTTP_ADDR="+addr)
+		cmd.Env = append(env, "APP_HTTP_ADDR="+addr, "APP_METRICS_ADDR="+metricsAddr)
 		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 
 		if err := cmd.Start(); err != nil {
@@ -150,6 +157,7 @@ func startClusterWith(t *testing.T, overrides map[string]string) cluster {
 		base := "http://" + addr
 		waitReady(t, base)
 		c.bases = append(c.bases, base)
+		c.metrics = append(c.metrics, "http://"+metricsAddr)
 	}
 	return c
 }

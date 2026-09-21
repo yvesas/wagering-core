@@ -30,7 +30,7 @@ Hexagonal, dependência sempre para dentro: `adapter → app → domain`.
 | `cmd/` | Binários; cada um monta seu grafo Fx e mais nada |
 | `internal/domain/` | Entidades, value objects, invariantes, erros — sem infra |
 | `internal/app/` | Casos de uso e as portas que exigem |
-| `internal/adapter/` | HTTP, PostgreSQL, fila, verificação de token |
+| `internal/adapter/` | HTTP, PostgreSQL, fila, token, métricas |
 | `internal/platform/` | Config, log, métricas, módulos Fx compartilhados |
 | `migrations/` · `test/` | SQL versionado · integração com containers reais |
 
@@ -88,6 +88,11 @@ requisitos de produto, e nenhum arquivo cita empresa, marca ou terceiro.
   implementar errado e passar no teste do caminho feliz.
 - **Caso de uso chamado sem identidade no `context` falha**, de propósito. Teste
   novo que instancia um caso de uso precisa dizer quem está chamando.
+- **Métrica não aceita identificador.** Id de carteira ou provedor num label é
+  uma série por carteira; isso vai no log. O label de rota sai da tabela de
+  rotas, nunca do caminho da requisição.
+- **Transação não é snapshot.** O padrão do PostgreSQL dá uma vista por
+  *statement*; leitura que precisa de vista única usa a porta `Snapshot`.
 
 ## Onde fica o quê
 

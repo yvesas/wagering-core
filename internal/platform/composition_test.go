@@ -53,6 +53,10 @@ func setTestEnv(t *testing.T, addr string) {
 		"OIDC_ISSUER_URL": issuer.URL(),
 		"OIDC_AUDIENCE":   oidctest.Audience,
 
+		// A port of its own per test, for the same reason the HTTP one gets
+		// one: two graphs in one run would otherwise fight over the default.
+		"APP_METRICS_ADDR": freePort(t),
+
 		"APP_ENV":              "test",
 		"APP_HTTP_ADDR":        addr,
 		"APP_LOG_LEVEL":        "error",

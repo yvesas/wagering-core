@@ -118,9 +118,15 @@ type Consumer struct {
 	clock  Clock
 	cfg    ConsumerConfig
 	logger *slog.Logger
+
+	// metrics covers both areas this type touches: the queue's own numbers,
+	// and the operation outcome -- because the queue is an entry port and the
+	// operations that arrive through it belong on the same meters as the ones
+	// that arrive over HTTP, told apart by their source label.
+	metrics QueueMetrics
 }
 
-func NewConsumer(queue Queue, uow UnitOfWork, submit *SubmitTransaction, clock Clock, cfg ConsumerConfig, logger *slog.Logger) *Consumer {
+func NewConsumer(queue Queue, uow UnitOfWork, submit *SubmitTransaction, clock Clock, cfg ConsumerConfig, metrics QueueMetrics, logger *slog.Logger) *Consumer {
 	if cfg.Name == "" {
 		cfg.Name = "wager-transactions"
 	}
@@ -130,7 +136,10 @@ func NewConsumer(queue Queue, uow UnitOfWork, submit *SubmitTransaction, clock C
 	if cfg.IdleBackoff <= 0 {
 		cfg.IdleBackoff = time.Second
 	}
-	return &Consumer{queue: queue, uow: uow, submit: submit, clock: clock, cfg: cfg, logger: logger}
+	return &Consumer{
+		queue: queue, uow: uow, submit: submit, clock: clock, cfg: cfg,
+		metrics: queueMetricsOr(metrics), logger: logger,
+	}
 }
 
 // Run polls until the context is done.
@@ -208,6 +217,7 @@ func (c *Consumer) handle(ctx context.Context, message QueueMessage) {
 		c.logger.Error("discarding a malformed envelope",
 			slog.String("consumer", c.cfg.Name),
 			slog.String("error", err.Error()))
+		c.metrics.MessageDiscarded(DiscardMalformed)
 		c.finish(ctx, message, outcomeDelete)
 		return
 	}
@@ -223,10 +233,16 @@ func (c *Consumer) handle(ctx context.Context, message QueueMessage) {
 			slog.String("consumer", c.cfg.Name),
 			slog.String("messageId", envelope.MessageID),
 			slog.String("error", err.Error()))
+		c.metrics.MessageDiscarded(DiscardNoProvider)
 		c.finish(ctx, message, outcomeDelete)
 		return
 	}
 
+	// The work context, so the log lines the use case writes carry the same
+	// correlation id as the ones written here.
+	work := WithCorrelationID(ctx, envelope.MessageID)
+
+	started := time.Now()
 	result, decided, err := c.apply(ctx, envelope, cmd, identity)
 	if err != nil {
 		// Transient: hand it straight back rather than leaving it invisible for
@@ -235,16 +251,30 @@ func (c *Consumer) handle(ctx context.Context, message QueueMessage) {
 			slog.String("consumer", c.cfg.Name),
 			slog.String("messageId", envelope.MessageID),
 			slog.String("error", err.Error()))
+		c.metrics.MessageReleased()
 		c.finish(ctx, message, outcomeRelease)
 		return
 	}
 
 	if decided {
-		c.logger.Info("applied from the queue",
+		// Only a delivery that did the work is timed and counted as an
+		// operation. One that found the work already done is a duplicate, and
+		// folding it in would make the latency of a redelivery storm look like
+		// an improvement.
+		c.submit.Settled(work, SourceQueue, time.Since(started), result, nil)
+
+		// One line about the delivery, carrying the message id; the use case
+		// logs the operation itself with the business identifiers. Two lines
+		// because they answer two questions -- "did this message get handled"
+		// and "what happened to this bet" -- and the transaction id joins them.
+		c.logger.Info("delivery handled",
 			slog.String("consumer", c.cfg.Name),
 			slog.String("messageId", envelope.MessageID),
-			slog.String("transactionId", result.Transaction.ID().String()),
-			slog.String("status", string(result.Transaction.Status())))
+			slog.String("transactionId", result.Transaction.ID().String()))
+	} else {
+		// Absorbed by the inbox. A steady trickle is the at-least-once
+		// contract working; a spike is something upstream redelivering.
+		c.metrics.MessageDeduplicated()
 	}
 	c.finish(ctx, message, outcomeDelete)
 }
@@ -306,6 +336,7 @@ func (c *Consumer) apply(ctx context.Context, envelope Envelope, cmd SubmitComma
 				slog.String("consumer", c.cfg.Name),
 				slog.String("messageId", envelope.MessageID),
 				slog.String("code", string(de.Code)))
+			c.metrics.MessageDiscarded(DiscardUnusable)
 		} else {
 			result = applied
 		}
@@ -359,6 +390,7 @@ func (c *Consumer) alreadySeen(ctx context.Context, repos Repositories, envelope
 		c.logger.Error("a repeated message id carries different content",
 			slog.String("consumer", c.cfg.Name),
 			slog.String("messageId", envelope.MessageID))
+		c.metrics.MessageDiscarded(DiscardReusedID)
 		return nil
 	}
 

@@ -54,6 +54,9 @@
 | 2026-09-18 | `.claude/` bifurcado do `yas-claude-base` v0.6.4 | O baseline assume TypeScript, e a suposição matava guardas em silêncio. Detalhe em `.claude/README.md`. |
 | 2026-09-18 | Branch resolvida por `symbolic-ref`, não `rev-parse` | Em repositório sem commits o `rev-parse --abbrev-ref HEAD` devolve `"HEAD"`, e o guard de commit na `main` liberava em silêncio. |
 | 2026-09-18 | Guards de hook falham fechados sem parser JSON | Guarda que não lê o pedido não sabe o que autorizar. A versão anterior liberava tudo, inclusive `cat .env`. |
+| 2026-09-20 | Reconciliação é `POST` embora não altere nada | Lê todo lançamento que a carteira já teve. `GET` convida cache, prefetch e retry-por-timeout, e nenhum deles devia decidir a frequência disso. |
+| 2026-09-20 | Divergência de reconciliação responde 200 | Quem chamou perguntou se os dois batem; responder "não batem" é o endpoint funcionando. Um não-2xx faria um monitor tratar verificação bem-sucedida como requisição quebrada. |
+| 2026-09-20 | Registry Prometheus próprio, não o `DefaultRegisterer` | Registry global é estado que qualquer dependência escreve, e registro duplicado entra em pânico no start-up. O que é exportado passa a ser o que o arquivo diz. |
 | 2026-09-19 | Escopos no claim `scp` do realm local, não como client scopes do Keycloak | Declarar `clientScopes` num realm de import substitui os padrões e quebra o console administrativo. O serviço lê `scope` e `scp`; o realm local é conveniência de desenvolvimento, não modelo de produção. |
 | 2026-09-19 | `golang-jwt` para o token, cache de chaves escrito aqui | A biblioteca faz a parte perigosa — parsing, `alg`, `exp`, `aud`. O cache é a parte que precisa ser testável contra um emissor que rotaciona e cai, e são cem linhas. |
 | 2026-09-19 | Janela mínima de cinco segundos entre buscas de JWKS | Trinta segundos faziam uma rotação recusar token legítimo por meio minuto; zero deixaria `kid` inventado virar um jeito de martelar o IdP. |

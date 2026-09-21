@@ -76,7 +76,8 @@ func newConsumerFixture(t *testing.T, balance string) consumerFixture {
 	base := newSubmitFixture(t, balance)
 	queue := &fakeQueue{}
 	consumer := NewConsumer(queue, &memoryUnitOfWork{store: base.store}, base.submit,
-		base.clock, ConsumerConfig{Name: "test-consumer", BatchSize: 10}, discardLogger())
+		base.clock, ConsumerConfig{Name: "test-consumer", BatchSize: 10},
+		base.metrics, discardLogger())
 	return consumerFixture{submitFixture: base, queue: queue, consumer: consumer}
 }
 
@@ -272,7 +273,7 @@ func TestATransientFailureReleasesTheMessage(t *testing.T) {
 	base.store.failOnInsertTx = errors.New("the database went away")
 
 	consumer := NewConsumer(queue, &memoryUnitOfWork{store: base.store}, base.submit,
-		base.clock, ConsumerConfig{Name: "test-consumer"}, discardLogger())
+		base.clock, ConsumerConfig{Name: "test-consumer"}, base.metrics, discardLogger())
 
 	f := consumerFixture{submitFixture: base, queue: queue, consumer: consumer}
 	queue.push("receipt-1", f.envelopeFor("msg-1", "BET", "25.00", "tx-1"))

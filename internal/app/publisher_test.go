@@ -47,7 +47,7 @@ var testPublisherPolicy = PublisherPolicy{
 
 func (f submitFixture) publisher(broker EventPublisher) *Publisher {
 	return NewPublisher(&memoryUnitOfWork{store: f.store}, broker, f.clock,
-		testPublisherPolicy, discardLogger())
+		testPublisherPolicy, f.metrics, discardLogger())
 }
 
 func TestThePublisherSendsAndMarks(t *testing.T) {

@@ -97,3 +97,27 @@ func authenticated(req *http.Request) *http.Request {
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	return req
 }
+
+// stubReconciler answers whatever the test sets, so the handler can be checked
+// without a database, a ledger or a snapshot.
+type stubReconciler struct {
+	result app.Reconciliation
+	err    error
+	got    string
+}
+
+func (s *stubReconciler) Execute(_ context.Context, walletID string) (app.Reconciliation, error) {
+	s.got = walletID
+	return s.result, s.err
+}
+
+// testRoutes builds the mux the way the composition layer does.
+//
+// The observer is nil: what these tests are about is what a caller gets back,
+// and a recorder would be a second thing to keep in step for no assertion.
+// internal/adapter/metrics has its own tests for the numbers.
+func testRoutes(t *testing.T, wallets *WalletHandler, transactions *TransactionHandler) *http.ServeMux {
+	t.Helper()
+	return Routes(testAuth(t), nil, wallets, transactions,
+		NewReconciliationHandler(&stubReconciler{}), NewHealthHandler())
+}

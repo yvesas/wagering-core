@@ -8,12 +8,14 @@ import (
 	"net"
 	nethttp "net/http"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" driver for migrations
 	"go.uber.org/fx"
 
 	httpadapter "github.com/yvesas/wagering-core/internal/adapter/http"
+	"github.com/yvesas/wagering-core/internal/adapter/metrics"
 	"github.com/yvesas/wagering-core/internal/adapter/oidc"
 	"github.com/yvesas/wagering-core/internal/adapter/postgres"
 	sqsadapter "github.com/yvesas/wagering-core/internal/adapter/sqs"
@@ -41,9 +43,28 @@ var DatabaseModule = fx.Module("database",
 	fx.Provide(
 		newPool,
 		postgres.NewUnitOfWork,
+		postgres.NewSnapshot,
 		postgres.NewQueries,
 		postgres.NewProbe,
 	),
+)
+
+// MetricsModule builds the recorder and hands it out under each narrow port.
+//
+// Six one-line constructors rather than fx.As annotations, for the reason the
+// handlers are wired the same way: the binding is Go satisfying an interface,
+// visible to a reader and to the compiler, and not a string in an option.
+var MetricsModule = fx.Module("metrics",
+	fx.Provide(
+		metrics.New,
+		func(r *metrics.Recorder) app.OperationMetrics { return r },
+		func(r *metrics.Recorder) app.QueueMetrics { return r },
+		func(r *metrics.Recorder) app.OutboxMetrics { return r },
+		func(r *metrics.Recorder) app.ReconciliationMetrics { return r },
+		func(r *metrics.Recorder) app.StorageMetrics { return r },
+		func(r *metrics.Recorder) httpadapter.RequestObserver { return r },
+	),
+	fx.Invoke(runMetricsServer),
 )
 
 // AdaptersModule provides the ports that are not storage.
@@ -64,6 +85,7 @@ var UseCasesModule = fx.Module("usecases",
 		newReferenceWorker,
 		app.NewWalletQueries,
 		app.NewTransactionQueries,
+		app.NewReconcileWallet,
 	),
 )
 
@@ -73,6 +95,7 @@ var HTTPModule = fx.Module("http",
 		newAuthenticator,
 		newWalletHandler,
 		newTransactionHandler,
+		newReconciliationHandler,
 		newHealthHandler,
 		httpadapter.Routes,
 		httpadapter.Handler,
@@ -101,6 +124,7 @@ var WorkersModule = fx.Module("workers",
 // Module is the whole application.
 var Module = fx.Options(
 	ConfigModule,
+	MetricsModule,
 	DatabaseModule,
 	AdaptersModule,
 	UseCasesModule,
@@ -108,6 +132,64 @@ var Module = fx.Options(
 	HTTPModule,
 	WorkersModule,
 )
+
+// runMetricsServer serves the exposition endpoint on a listener of its own.
+//
+// A second server rather than a route on the business API, and the reason is
+// who does the asking. Everything on the main port is authenticated; a scraper
+// is not a provider and has no token, and giving it one would mean a client in
+// the realm, a credential file and something to renew. This port is not
+// published outside the local network, so what reaches it is what the network
+// already trusts.
+//
+// It is also an isolation that pays off the other way: a scrape cannot compete
+// for the business server's connection limits, and the business server's drain
+// cannot hold up a shutdown waiting for a scrape.
+func runMetricsServer(lc fx.Lifecycle, recorder *metrics.Recorder, cfg AppConfig, logger *slog.Logger) {
+	mux := nethttp.NewServeMux()
+	mux.Handle("GET /metrics", recorder.Handler())
+
+	server := &nethttp.Server{
+		Addr:              cfg.MetricsAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	lc.Append(fx.Hook{
+		OnStart: func(context.Context) error {
+			// The listener is opened here, not inside ListenAndServe, so a port
+			// already in use fails the start instead of being reported by a
+			// goroutine nobody reads.
+			listener, err := net.Listen("tcp", server.Addr)
+			if err != nil {
+				return err
+			}
+			logger.Info("metrics listening", slog.String("addr", listener.Addr().String()))
+
+			go func() {
+				if err := server.Serve(listener); err != nil && !errors.Is(err, nethttp.ErrServerClosed) {
+					logger.Error("metrics server stopped", slog.String("error", err.Error()))
+				}
+			}()
+			return nil
+		},
+		OnStop: func(ctx context.Context) error {
+			// A short deadline of its own. Nothing here is worth delaying a
+			// deploy for: the worst a cut scrape costs is one missing sample,
+			// and Prometheus will ask again in fifteen seconds.
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+			defer cancel()
+
+			if err := server.Shutdown(ctx); err != nil {
+				return server.Close()
+			}
+			return nil
+		},
+	})
+}
 
 // newAuthenticator reaches the identity provider and builds the edge's guard.
 //
@@ -184,8 +266,8 @@ func publisherPolicy(cfg AppConfig) app.PublisherPolicy {
 	}
 }
 
-func newPublisher(uow app.UnitOfWork, publisher app.EventPublisher, clock app.Clock, policy app.PublisherPolicy, logger *slog.Logger) *app.Publisher {
-	return app.NewPublisher(uow, publisher, clock, policy, logger)
+func newPublisher(uow app.UnitOfWork, publisher app.EventPublisher, clock app.Clock, policy app.PublisherPolicy, metrics app.OutboxMetrics, logger *slog.Logger) *app.Publisher {
+	return app.NewPublisher(uow, publisher, clock, policy, metrics, logger)
 }
 
 // runPublisher starts the outbox publisher and stops it before the pool closes.
@@ -232,6 +314,7 @@ func runConsumers(
 	submit *app.SubmitTransaction,
 	clock app.Clock,
 	cfg AppConfig,
+	queueMetrics app.QueueMetrics,
 	logger *slog.Logger,
 ) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -247,7 +330,7 @@ func runConsumers(
 					// message be handled once per loop.
 					Name:      cfg.QueueName,
 					BatchSize: cfg.QueueBatchSize,
-				}, logger)
+				}, queueMetrics, logger)
 
 				wg.Add(1)
 				go func() {
@@ -382,6 +465,10 @@ func newWalletHandler(open *app.OpenWallet, queries *app.WalletQueries) *httpada
 
 func newTransactionHandler(submit *app.SubmitTransaction, queries *app.TransactionQueries) *httpadapter.TransactionHandler {
 	return httpadapter.NewTransactionHandler(submit, queries)
+}
+
+func newReconciliationHandler(reconcile *app.ReconcileWallet) *httpadapter.ReconciliationHandler {
+	return httpadapter.NewReconciliationHandler(reconcile)
 }
 
 func newHealthHandler(probe *postgres.Probe) *httpadapter.HealthHandler {

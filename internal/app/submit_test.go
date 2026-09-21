@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -25,6 +26,10 @@ type submitFixture struct {
 	wallet domain.Wallet
 	clock  *movableClock
 
+	// metrics is what the fixture recorded, so a test can assert on the numbers
+	// an operator would see.
+	metrics *recordingMetrics
+
 	// ids is the fixture's own generator. A second one would start over and
 	// mint identifiers this store already holds.
 	ids *fakeIDs
@@ -34,11 +39,20 @@ type submitFixture struct {
 // tests run against is a wallet the system itself produced.
 func newSubmitFixture(t *testing.T, balance string) submitFixture {
 	t.Helper()
+	return newSubmitFixtureWithLogger(t, balance, discardLogger())
+}
+
+// newSubmitFixtureWithLogger is newSubmitFixture with somewhere to read the log
+// lines back from, for the tests that are about what gets written.
+func newSubmitFixtureWithLogger(t *testing.T, balance string, logger *slog.Logger) submitFixture {
+	t.Helper()
 	store := &memoryStore{}
 	ids := &fakeIDs{}
 	clock := newMovableClock(time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC))
 	uow := &memoryUnitOfWork{store: store}
 	queries := &memoryQueries{store: store}
+
+	recorder := newRecordingMetrics()
 
 	wallet, err := NewOpenWallet(uow, ids, clock).Execute(callerContext(), OpenWalletCommand{
 		PlayerID: "player-1",
@@ -50,11 +64,12 @@ func newSubmitFixture(t *testing.T, balance string) submitFixture {
 	}
 
 	return submitFixture{
-		submit: NewSubmitTransaction(uow, queries, ids, clock, testReferencePolicy),
-		store:  store,
-		wallet: wallet,
-		clock:  clock,
-		ids:    ids,
+		submit:  NewSubmitTransaction(uow, queries, ids, clock, testReferencePolicy, recorder, logger),
+		store:   store,
+		wallet:  wallet,
+		clock:   clock,
+		ids:     ids,
+		metrics: recorder,
 	}
 }
 
@@ -340,7 +355,7 @@ func TestIdempotencyDoesNotDependOnProcessMemory(t *testing.T) {
 		&memoryQueries{store: f.store},
 		&fakeIDs{},
 		f.clock,
-		testReferencePolicy,
+		testReferencePolicy, newRecordingMetrics(), discardLogger(),
 	)
 
 	replay, err := restarted.Execute(callerContext(), cmd)

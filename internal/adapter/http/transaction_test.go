@@ -90,7 +90,7 @@ const validSubmitBody = `{
 func submitRequestFor(t *testing.T, submitter *stubSubmitter, key, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	handler := NewTransactionHandler(submitter, &stubTxReader{})
-	mux := Handler(Routes(testAuth(t), NewWalletHandler(&stubOpener{}, &stubReader{}), handler, NewHealthHandler()))
+	mux := Handler(testRoutes(t, NewWalletHandler(&stubOpener{}, &stubReader{}), handler))
 
 	req := authenticated(httptest.NewRequest(http.MethodPost, "/wagering/transactions", strings.NewReader(body)))
 	if key != "" {
@@ -247,7 +247,7 @@ func TestGetTransactionByProviderUsesBothPathValues(t *testing.T) {
 	t.Parallel()
 	reader := &stubTxReader{transaction: sampleTransaction(t, domain.StatusProcessed, "")}
 	handler := NewTransactionHandler(&stubSubmitter{}, reader)
-	mux := Handler(Routes(testAuth(t), NewWalletHandler(&stubOpener{}, &stubReader{}), handler, NewHealthHandler()))
+	mux := Handler(testRoutes(t, NewWalletHandler(&stubOpener{}, &stubReader{}), handler))
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, authenticated(httptest.NewRequest(http.MethodGet,
@@ -265,7 +265,7 @@ func TestAnUnprocessedTransactionHasNoBalance(t *testing.T) {
 	t.Parallel()
 	reader := &stubTxReader{transaction: sampleTransaction(t, domain.StatusRejected, domain.CodeInsufficientFunds)}
 	handler := NewTransactionHandler(&stubSubmitter{}, reader)
-	mux := Handler(Routes(testAuth(t), NewWalletHandler(&stubOpener{}, &stubReader{}), handler, NewHealthHandler()))
+	mux := Handler(testRoutes(t, NewWalletHandler(&stubOpener{}, &stubReader{}), handler))
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, authenticated(httptest.NewRequest(http.MethodGet, "/wagering/transactions/tx-1", nil)))
