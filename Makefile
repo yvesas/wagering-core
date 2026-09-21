@@ -4,7 +4,7 @@ GO ?= go
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup fmt fmt-check vet domain-check app-check test race cover check up up-test down logs token test-integration test-concurrency
+.PHONY: help setup fmt fmt-check vet domain-check app-check test race cover check up up-deps up-test down logs logs-all token simulate test-integration test-concurrency
 
 help: ## List the available targets
 	@grep -E '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -55,8 +55,22 @@ cover: ## Run the tests with a coverage report
 
 check: fmt-check vet domain-check app-check test race ## Full gate before committing
 
-up: ## Start the local dependencies
-	docker compose up --build
+up: ## Start the whole system in Docker
+	docker compose up -d --build api
+	@echo "api      http://localhost:$${APP_PORT:-8080}"
+	@echo "keycloak http://localhost:$${OIDC_PORT:-8081}"
+	@echo "metrics  docker compose exec api wget -qO- http://127.0.0.1:9090/metrics"
+
+up-deps: ## Start only what the service needs, to run it on the host
+	docker compose up -d postgres localstack keycloak
+
+# SCENARIO picks which one; `all` runs every scenario in order. The simulator
+# runs inside the network, which is how it asks Keycloak for a token at the
+# same address the service validates against.
+SCENARIO ?= all
+
+simulate: ## Exercise the API as a client would (SCENARIO=happy-path)
+	docker compose --profile sim run --rm --build simulator "./$(SCENARIO).sh"
 
 up-test: ## Start the isolated database and queue used by the integration tests
 	docker compose --profile test up -d postgres-test localstack-test
@@ -64,7 +78,10 @@ up-test: ## Start the isolated database and queue used by the integration tests
 down: ## Stop the local dependencies and drop the volumes
 	docker compose down -v
 
-logs: ## Follow the compose logs
+logs: ## Follow the logs of the service
+	docker compose logs -f api
+
+logs-all: ## Follow every container's logs
 	docker compose logs -f
 
 # CLIENT picks which local credential to mint: provider-acme, provider-rival or
