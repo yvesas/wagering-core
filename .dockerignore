@@ -1,0 +1,46 @@
+# What must never reach the build context.
+#
+# The build stage does `COPY . .`, so anything listed here is the difference
+# between "not in the repository" and "not in the image". A .env is gitignored
+# and would still be copied into a layer -- and a layer is readable by anyone
+# who can pull the image, whatever the final stage does afterwards.
+.env
+.env.*
+!.env.example
+
+# History. Large, and it carries every version of every file ever committed.
+.git
+.gitignore
+.githooks
+
+# The agent's own configuration and the execution notes. Neither is the
+# product, and both are prose.
+.claude
+AGENTS.md
+
+# Nothing in here is compiled into the binary.
+docs
+specs
+deploy
+scripts
+README.md
+*.md
+
+# Build output and coverage from a local run, which would only invalidate the
+# layer cache for no reason.
+bin
+dist
+coverage.out
+coverage.html
+*.prof
+*.test
+*.exe
+
+# Someone else's compose and CI.
+docker-compose.yml
+Dockerfile
+.github
+
+.DS_Store
+.idea
+.vscode

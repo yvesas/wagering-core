@@ -29,6 +29,7 @@ repositório, na pasta de controle ao lado.
 | 8 | Publicação por registro de saída | pronta |
 | 9 | Autenticação OIDC e isolamento entre provedores | pronta |
 | 10 | Observabilidade, métricas e reconciliação | pronta |
+| 11 | Execução em container e simulação de clientes | pronta |
 
 ## Pré-requisitos
 
@@ -41,8 +42,12 @@ repositório, na pasta de controle ao lado.
 git clone <url> && cd wagering-core
 make setup            # aponta o git para .githooks e verifica o hook
 cp .env.example .env  # ajuste o que precisar; nenhum segredo real entra aqui
-make up               # sobe PostgreSQL, o emulador de fila e o Keycloak local
+make up               # sobe o sistema inteiro em Docker, aplicação incluída
 ```
+
+A aplicação sobe junto com as dependências, e as migrations rodam no start-up.
+Detalhe em [`docs/runbooks/running.md`](docs/runbooks/running.md) — inclusive o
+que fazer quando não sobe.
 
 **Todo endpoint de negócio exige um token.** Não há chave que desligue a
 autenticação — essa chave é justamente aquela cujo valor errado é invisível.
@@ -73,7 +78,9 @@ make vet      # go vet ./...
 make fmt      # formata
 make cover    # cobertura em coverage.html
 make token    # imprime um token do Keycloak local (CLIENT=...)
-make up       # sobe o ambiente local
+make simulate # exercita a API como um cliente (SCENARIO=happy-path)
+make up       # sobe o sistema inteiro
+make up-deps  # só as dependências, para rodar o app no host
 make down     # derruba e apaga os volumes
 ```
 
@@ -92,6 +99,8 @@ versionado com valores locais de exemplo; `.env` nunca é.
 | Contrato dos eventos | `docs/events.md` |
 | Autenticação e isolamento | `docs/security.md` |
 | Métricas, logs e reconciliação | `docs/observability.md` |
+| Rodar, parar e depurar | `docs/runbooks/running.md` |
+| Simular clientes da API | `docs/runbooks/simulating-clients.md` |
 | Visão, princípios e stack | `specs/project/PROJECT.md` |
 | Requisitos com ID rastreável | `specs/project/REQUIREMENTS.md` |
 | O que está sendo construído agora | `specs/features/NNNN-slug/spec.md` |

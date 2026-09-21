@@ -39,6 +39,8 @@ Hexagonal, dependência sempre para dentro: `adapter → app → domain`.
 ```sh
 make setup    # reinstala core.hooksPath — rode logo após clonar
 make check    # fmt + vet + domain-check + test + race — o gate antes de commitar
+make up       # sobe o sistema inteiro em Docker
+make simulate # exercita a API como um cliente faria (SCENARIO=all)
 make help     # lista todos os alvos
 ```
 
@@ -93,6 +95,11 @@ requisitos de produto, e nenhum arquivo cita empresa, marca ou terceiro.
   rotas, nunca do caminho da requisição.
 - **Transação não é snapshot.** O padrão do PostgreSQL dá uma vista por
   *statement*; leitura que precisa de vista única usa a porta `Snapshot`.
+- **Erro dentro de transação aborta a transação.** Um insert que viola
+  constraint deixa todo statement seguinte falhando com `25P02` — então
+  detectar conflito e *ler* em seguida exige `ON CONFLICT DO NOTHING`, não
+  deixar o banco levantar o erro. O fake em memória não modela isso: foi como
+  o registro de entrada ficou quebrado por três fases.
 
 ## Onde fica o quê
 

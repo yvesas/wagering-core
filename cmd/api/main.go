@@ -20,7 +20,17 @@ import (
 // closing the pool. APP_SHUTDOWN_TIMEOUT governs the drain itself.
 const shutdownGrace = 60 * time.Second
 
+// version is stamped at build time with -ldflags "-X main.version=...", and is
+// "dev" for a plain `go build`.
+//
+// It is logged once at start-up because the first question about a running
+// container is which build it is, and the answer belongs in the same place as
+// everything else that gets asked at three in the morning.
+var version = "dev"
+
 func main() {
+	slog.Info("starting", slog.String("version", version))
+
 	app := fx.New(
 		platform.Module,
 

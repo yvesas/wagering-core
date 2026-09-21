@@ -1,4 +1,17 @@
-# Local environment: PostgreSQL, an SQS emulator and an identity provider.
+# The whole system, locally: the service, its dependencies and a client
+# simulator.
+#
+#   make up                         the system
+#   make up-deps                    only what the service needs
+#   make simulate SCENARIO=...      exercise it as a provider would
+#
+# One thing here is worth understanding before changing it. Keycloak listens on
+# 8081 *inside* the network and is published as 8081 outside, so `keycloak:8081`
+# is the same URL from both sides. That is not tidiness: a token is accepted
+# only when its `iss` matches what the service was configured to expect, and an
+# issuer reachable at two different addresses has to pick one to put in the
+# token. Publishing 8081:8080 would mean tokens minted from the host carry an
+# issuer the service cannot reach, and every one of them would be refused.
 
 services:
   postgres:
@@ -59,7 +72,12 @@ services:
     ports:
       - "${QUEUE_PORT:-4566}:4566"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -q '\"sqs\": \"available\"'"]
+      # Both states, and that is not belt and braces. LocalStack reports a
+      # service as "available" until something uses it and "running"
+      # afterwards -- so a check that accepted only the first turned the
+      # container unhealthy the moment the application created its queues,
+      # which is to say the moment it started working.
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -Eq '\"sqs\": \"(available|running)\"'"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -77,7 +95,7 @@ services:
     ports:
       - "4567:4566"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -q '\"sqs\": \"available\"'"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -Eq '\"sqs\": \"(available|running)\"'"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -101,7 +119,15 @@ services:
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
     container_name: wagering-keycloak
-    command: ["start-dev", "--import-realm", "--http-port=8080"]
+    # --http-port=8081 so the port is the same inside and outside, and
+    # --hostname pins what goes into the `iss` claim. Left unpinned, Keycloak
+    # derives the issuer from whichever address the token was requested
+    # through, and the same realm would mint tokens the service refuses.
+    command:
+      - start-dev
+      - --import-realm
+      - --http-port=8081
+      - --hostname=http://keycloak:8081
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-local-dev-only}
@@ -109,7 +135,7 @@ services:
     volumes:
       - ./deploy/keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
     ports:
-      - "${OIDC_PORT:-8081}:8080"
+      - "${OIDC_PORT:-8081}:8081"
     healthcheck:
       # The management port, which is where Keycloak 25+ serves health. The
       # image ships neither curl nor wget, so this goes through bash's own
@@ -124,6 +150,88 @@ services:
       timeout: 5s
       retries: 30
       start_period: 20s
+
+  # The service.
+  api:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+    container_name: wagering-api
+    # Every address here is a name on this network. localhost inside a
+    # container is the container, which is the single most common way a compose
+    # file looks right and connects to nothing.
+    environment:
+      APP_ENV: local
+      APP_HTTP_ADDR: ":8080"
+      APP_METRICS_ADDR: ":9090"
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL:-info}
+
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-wagering}
+      DB_USER: ${DB_USER:-wagering}
+      DB_PASSWORD: ${DB_PASSWORD:-local-dev-only}
+      DB_SSLMODE: disable
+
+      QUEUE_ENDPOINT: http://localstack:4566
+      QUEUE_REGION: ${QUEUE_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+
+      OIDC_ISSUER_URL: http://keycloak:8081/realms/wagering
+      OIDC_AUDIENCE: wagering-core
+    ports:
+      # Only the business port. The metrics listener is deliberately not
+      # published: it answers without a credential, and what reaches it should
+      # be what this network already trusts. A scraper joins the network; it
+      # does not come in from outside. See docs/adr/0012.
+      - "${APP_PORT:-8080}:8080"
+    depends_on:
+      # By health, not by "started". The service runs its migrations at
+      # start-up and reaches the identity provider while the graph is being
+      # built -- against a database still initialising, it would fail the boot
+      # and restart, which reads like a bug in the service.
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # A client, for exercising the API the way a provider would.
+  #
+  # Behind a profile, so it never starts with `make up`. It runs inside the
+  # network on purpose: it asks Keycloak for a token at the same address the
+  # service validates against, which is the whole `iss` problem solved by
+  # standing in the right place rather than by configuring around it.
+  simulator:
+    build:
+      context: .
+      dockerfile: deploy/simulator/Dockerfile
+    container_name: wagering-simulator
+    environment:
+      API_URL: http://api:8080
+      METRICS_URL: http://api:9090
+      OIDC_URL: http://keycloak:8081/realms/wagering
+      CLIENT_SECRET: local-dev-only
+      QUEUE_ENDPOINT: http://localstack:4566
+      QUEUE_NAME: ${QUEUE_NAME:-wager-transactions.fifo}
+      # For the one scenario that plants a drift, which needs to write where
+      # the domain cannot reach.
+      DB_HOST: postgres
+      DB_NAME: ${DB_NAME:-wagering}
+      DB_USER: ${DB_USER:-wagering}
+      DB_PASSWORD: ${DB_PASSWORD:-local-dev-only}
+    volumes:
+      # Mounted rather than baked in: a scenario is meant to be edited and run
+      # again, and a rebuild between the two would cost more than the script.
+      - ./scripts/simulate:/scenarios:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    profiles: ["sim"]
 
 volumes:
   postgres-data:
