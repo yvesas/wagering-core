@@ -30,6 +30,7 @@ README.md
 # layer cache for no reason.
 bin
 dist
+reports
 coverage.out
 coverage.html
 *.prof
