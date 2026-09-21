@@ -78,7 +78,7 @@ make vet      # go vet ./...
 make fmt      # formata
 make cover    # cobertura em coverage.html
 make token    # imprime um token do Keycloak local (CLIENT=...)
-make simulate # exercita a API como um cliente (SCENARIO=happy-path)
+make simulate # exercita a API como um cliente; grava relatório em reports/
 make up       # sobe o sistema inteiro
 make up-deps  # só as dependências, para rodar o app no host
 make down     # derruba e apaga os volumes

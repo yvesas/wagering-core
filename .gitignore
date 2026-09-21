@@ -9,6 +9,11 @@
 *.exe
 *.test
 
+# What a simulation run produced. Worth reading, not worth versioning: every
+# run writes a new file and they differ by timestamp and wallet id.
+/reports/*
+!/reports/.gitkeep
+
 # Coverage and profiles
 coverage.out
 coverage.html

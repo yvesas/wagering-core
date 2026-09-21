@@ -69,6 +69,23 @@ ponto.
 | `reversals` | `REFUND` devolve; nada é revertido duas vezes; valor divergente é recusado; reversão que chega **antes** da referência é estacionada e resolve depois |
 | `reconciliation` | Carteira saudável bate; divergência plantada aparece no corpo, na métrica e no log; **nada é corrigido** |
 
+## O relatório
+
+Toda execução grava um Markdown em `reports/` — pasta gitignorada, um arquivo
+por execução, com o horário no nome porque duas execuções valem ser comparadas
+e um nome fixo faria a última ser a única.
+
+```
+reports/simulate-20260921-155714-all.md
+```
+
+Ele traz a tabela-resumo, o detalhe de cada cenário e, quando algo falha, o
+valor obtido ao lado do esperado. É Markdown porque quem lê é uma pessoa: cola
+num PR e a falha é legível sem ferramenta.
+
+O caminho é impresso no fim da execução. Rodar fora do compose, sem a pasta
+montada, não falha: o relatório é pulado e a execução diz isso.
+
 ## Como ler a saída
 
 - `ok` / `NOT` — uma verificação, com o valor obtido e o esperado.
@@ -109,6 +126,14 @@ esperava um código de conflito nomeado onde a resposta correta é o genérico, 
 verifiquei `401` em rotas que não existem — onde o router responde `405` antes
 de qualquer handler.
 
+**4. Um prazo apertado demais no cenário de fila**, que só aparecia quando ele
+rodava logo depois do de concorrência: a entrega gastava um *visibility
+timeout* inteiro antes de ser aplicada. Isolado, o mesmo cenário entrega em
+menos de um segundo. O prazo subiu para três ciclos, pelo motivo acima — e vale
+dizer que **a causa exata dos 30s não foi isolada**: a hipótese é disputa pelo
+pool de conexões logo após a rajada, e o que está provado é que o prazo anterior
+afirmava mais do que o contrato oferece.
+
 ## Escrever um cenário novo
 
 `lib.sh` traz o que todos usam: `token`, `http`, `submit`, `open_wallet`,
@@ -132,6 +157,12 @@ Duas regras que valem a pena:
 
 - **Nada de `sleep` como sincronização.** A porta de fila é assíncrona; use
   `wait_for`, que faz polling com prazo.
+- **Prazo generoso no que passa pela fila.** Entrega é at-least-once com
+  *visibility timeout* de 30s, e a porta de fila divide o pool de conexões com
+  o HTTP — logo depois de uma rajada de requisições, uma entrega pode gastar um
+  ciclo inteiro antes de ser aplicada. Esperar menos que isso é afirmar que a
+  primeira tentativa sempre chega, o que nada promete. Os cenários daqui usam
+  90s, três ciclos.
 - **Sempre `$RUN_ID` nos identificadores.** Sem isso, a segunda execução colide
   com a primeira e a falha parece bug do sistema.
 

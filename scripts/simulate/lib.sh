@@ -33,23 +33,60 @@ RUN_ID="$(date +%H%M%S)-$RANDOM"
 CHECKS_PASSED=0
 CHECKS_FAILED=0
 
+# The report.
+#
+# What a run prints is gone when the terminal scrolls, and comparing two runs
+# needs something that outlived both. Markdown rather than JSON because the
+# reader is a person: it pastes into a pull request, and a failure is legible
+# without a tool.
+#
+# REPORT_BODY and REPORT_SUMMARY are set by all.sh when it drives several
+# scenarios into one report. A scenario run on its own makes its own.
+source "$(dirname "${BASH_SOURCE[0]}")/report.sh"
+
+SCENARIO_NAME="$(basename "${BASH_SOURCE[1]:-scenario}" .sh)"
+REPORT_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+REPORT_OWNED=0
+if [[ -z "${REPORT_BODY:-}" ]]; then
+  REPORT_OWNED=1
+  REPORT_BODY="$(mktemp)"
+  REPORT_SUMMARY="$(mktemp)"
+fi
+printf '\n## %s\n' "$SCENARIO_NAME" >> "$REPORT_BODY"
+
+# record writes one line to the report. It is separate from printing so the
+# terminal can keep its colours and the file can stay plain.
+record() { printf '%s\n' "$*" >> "$REPORT_BODY"; }
+
 if [[ -t 1 ]]; then
   GREEN=$'\e[32m'; RED=$'\e[31m'; DIM=$'\e[2m'; BOLD=$'\e[1m'; RESET=$'\e[0m'
 else
   GREEN=''; RED=''; DIM=''; BOLD=''; RESET=''
 fi
 
-step()  { printf '\n%s== %s ==%s\n' "$BOLD" "$*" "$RESET"; }
-note()  { printf '%s   %s%s\n' "$DIM" "$*" "$RESET"; }
+step() {
+  printf '\n%s== %s ==%s\n' "$BOLD" "$*" "$RESET"
+  record ""
+  record "**${*}**"
+  record ""
+}
+
+note() {
+  printf '%s   %s%s\n' "$DIM" "$*" "$RESET"
+  record "- _${*}_"
+}
 
 pass() {
   CHECKS_PASSED=$((CHECKS_PASSED + 1))
   printf '%s   ok%s  %s\n' "$GREEN" "$RESET" "$*"
+  record "- ok — $*"
 }
 
 fail() {
   CHECKS_FAILED=$((CHECKS_FAILED + 1))
   printf '%s  NOT%s  %s\n' "$RED" "$RESET" "$*"
+  record "- **NOT** — $*"
 }
 
 # summary runs on exit, whichever way the script leaves, and decides the exit
@@ -58,6 +95,17 @@ fail() {
 summary() {
   local code=$?
   printf '\n%s---%s %d passed, %d failed\n' "$BOLD" "$RESET" "$CHECKS_PASSED" "$CHECKS_FAILED"
+  printf '| %s | %d | %d |\n' "$SCENARIO_NAME" "$CHECKS_PASSED" "$CHECKS_FAILED" >> "$REPORT_SUMMARY"
+
+  # Only a scenario running on its own finishes the report; when all.sh is
+  # driving, it owns the file and writes it once at the end.
+  if (( REPORT_OWNED )) && reportable; then
+    local path
+    path="$(report_path "$SCENARIO_NAME")"
+    write_report "$path"
+    printf '%s   report: %s%s\n' "$DIM" "$path" "$RESET"
+  fi
+
   if (( CHECKS_FAILED > 0 )); then
     exit 1
   fi

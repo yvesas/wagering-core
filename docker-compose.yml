@@ -228,6 +228,9 @@ services:
       # Mounted rather than baked in: a scenario is meant to be edited and run
       # again, and a rebuild between the two would cost more than the script.
       - ./scripts/simulate:/scenarios:ro
+      # Writable, and the only thing here that is: the report has to outlive
+      # the container, or comparing two runs means keeping a terminal open.
+      - ./reports:/reports
     depends_on:
       api:
         condition: service_healthy
